@@ -216,6 +216,17 @@ async function renderOrgList(main) {
 
       const emailAiBadge = `<span class="badge ${org.ai_responses_enabled ? "badge-green" : "badge-red"}">${org.ai_responses_enabled ? "On" : "Off"}</span>`;
 
+      const expiryBadge = org.subscription_end_date
+        ? (() => {
+            const endDate = new Date(org.subscription_end_date);
+            const daysLeft = Math.ceil((endDate - new Date()) / (1000*60*60*24));
+            const dateLabel = endDate.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+            if (daysLeft < 0) return `<span class="badge badge-red">Expired ${dateLabel}</span>`;
+            if (daysLeft <= 7) return `<span class="badge badge-yellow">${daysLeft}d left · ${dateLabel}</span>`;
+            return `<span class="badge badge-green">${dateLabel}</span>`;
+          })()
+        : `<span class="badge badge-gray">No expiry</span>`;
+
       const createdBy = org.created_by_name
         ? `<div class="text-xs text-subtle">${escHtml(org.created_by_name)}</div>` : "";
 
@@ -232,6 +243,7 @@ async function renderOrgList(main) {
           <td>${providerBadge}</td>
           <td>${emailAiBadge}</td>
           <td>${widgetBadge}</td>
+          <td>${expiryBadge}</td>
           <td>
             <div class="progress-wrap">
               <div class="progress-bar">
@@ -246,7 +258,7 @@ async function renderOrgList(main) {
     main.querySelector(".card").innerHTML = `
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Organization</th><th>Email</th><th>Email AI</th><th>Widget</th><th>Usage this month</th></tr></thead>
+          <thead><tr><th>Organization</th><th>Email</th><th>Email AI</th><th>Widget</th><th>Subscription</th><th>Usage this month</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>`;
@@ -297,6 +309,15 @@ function showNewOrgModal() {
             </select>
           </div>
         </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Subscription Plan</label>
+            <select id="new-org-plan">
+              <option value="monthly">Monthly</option>
+              <option value="yearly">Yearly</option>
+            </select>
+          </div>
+        </div>
         ${isOwner ? `
         <div class="form-row">
           <div class="form-group">
@@ -342,6 +363,7 @@ async function createOrg() {
       name, slug,
       ai_tone: document.getElementById("new-org-tone").value,
       subscription_tier: document.getElementById("new-org-tier").value,
+      subscription_plan: document.getElementById("new-org-plan").value,
     };
 
     if (isOwner) {
@@ -485,6 +507,7 @@ async function renderOrgDetail(main) {
         <button class="tab" onclick="switchTab('email')">Email Setup</button>
         <button class="tab" onclick="switchTab('widget')">Widget</button>
         <button class="tab" onclick="switchTab('kb')">Knowledge Base</button>
+        <button class="tab" onclick="switchTab('payments')">Payments</button>
         <button class="tab" onclick="switchTab('settings')">Settings</button>
       </div>
       <div id="tab-content"></div>`;
@@ -730,6 +753,7 @@ async function renderTab() {
     else if (currentTab === "email") renderEmailTab(el, org, providers);
     else if (currentTab === "widget") renderWidgetTab(el, widget, org);
     else if (currentTab === "kb") renderKbTab(el, kbDocs, org);
+    else if (currentTab === "payments") renderPaymentsTab(el, org);
     else if (currentTab === "settings") renderSettingsTab(el, org);
   } catch (e) {
     console.error("renderTab error:", e);
@@ -970,11 +994,13 @@ function renderWidgetTab(el, widget, org) {
     <div class="card mb-4">
       <div class="card-header">
         <div class="card-title">Widget Status</div>
+        ${isOwner ? `
         <label class="toggle">
           <input type="checkbox" id="widget-enabled-toggle" ${widget.enabled ? "checked" : ""}
             onchange="toggleWidget(this.checked)">
           <span class="toggle-slider"></span>
-        </label>
+        </label>` : `
+        <span class="badge badge-${widget.enabled ? "green" : "gray"}">${widget.enabled ? "Enabled" : "Disabled"}</span>`}
       </div>
       <div class="card-body">
         <div class="form-group">
@@ -1010,6 +1036,9 @@ function renderWidgetTab(el, widget, org) {
           <label>Welcome Message</label>
           <textarea id="w-welcome" rows="2">${escHtml(widget.welcome_message || "")}</textarea>
         </div>
+        <button class="btn btn-primary" style="margin-top:16px" onclick="saveWidgetConfig('${widget.id}')">
+          Save Widget Settings
+        </button>
       </div>
     </div>
 
@@ -1041,6 +1070,9 @@ function renderWidgetTab(el, widget, org) {
           <label>Allowed Domains <span class="hint">(comma-separated, empty = allow all)</span></label>
           <input type="text" id="w-domains" value="${escHtml(domains)}" placeholder="example.com, www.example.com" />
         </div>
+        <button class="btn btn-primary" style="margin-top:16px" onclick="saveWidgetConfig('${widget.id}')">
+          Save Widget Settings
+        </button>
       </div>
     </div>
 
@@ -1075,6 +1107,9 @@ function renderWidgetTab(el, widget, org) {
               </label>`).join("")}
           </div>
         </div>
+        <button class="btn btn-primary" style="margin-top:16px" onclick="saveWidgetConfig('${widget.id}')">
+          Save Widget Settings
+        </button>
       </div>
     </div>
 
@@ -1340,6 +1375,8 @@ async function deleteKbDoc(docId, title) {
 
 // ── Settings Tab ──────────────────────────────────────────────────────────────
 
+// ── Settings Tab ─────────────────────────────────────────────────────────────
+
 function renderSettingsTab(el, org) {
   // Demo orgs: salespeople can only edit AI Tone
   if (currentIsDemo && !isOwner) {
@@ -1408,16 +1445,53 @@ function renderSettingsTab(el, org) {
           </div>
         </div>
         <div class="form-row">
-          ${isOwner ? `
+          <div class="form-group">
+            <label>Subscription Plan</label>
+            <select id="s-plan">
+              <option value="monthly" ${org.subscription_plan==="monthly"?"selected":""}>Monthly</option>
+              <option value="yearly" ${org.subscription_plan==="yearly"?"selected":""}>Yearly</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <!-- spacer to keep the grid even -->
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Subscription Start</label>
+            ${isOwner
+              ? `<input type="date" id="s-start-date" value="${org.subscription_start_date ? new Date(org.subscription_start_date).toISOString().slice(0,10) : ''}" />`
+              : `<input type="text" value="${org.subscription_start_date ? new Date(org.subscription_start_date).toLocaleDateString() : 'Not set'}" readonly />`}
+          </div>
+          <div class="form-group">
+            <label>Subscription End${org.subscription_end_date && new Date(org.subscription_end_date) < new Date() ? ' <span class="badge badge-red" style="margin-left:6px">Expired</span>' : ''}</label>
+            ${isOwner
+              ? `<input type="date" id="s-end-date" value="${org.subscription_end_date ? new Date(org.subscription_end_date).toISOString().slice(0,10) : ''}" />`
+              : `<input type="text" value="${org.subscription_end_date ? new Date(org.subscription_end_date).toLocaleDateString() : 'No expiry'}" readonly />`}
+          </div>
+        </div>
+        ${isOwner ? `
+        <div class="form-row">
           <div class="form-group">
             <label>Monthly Message Limit</label>
             <input type="number" id="s-limit" value="${org.message_limit_per_month}" min="100" />
-          </div>` : ""}
+          </div>
+          <div class="form-group">
+            <label>Billing Day of Month</label>
+            <select id="s-billing-day">
+              ${Array.from({length: 28}, (_, i) => i + 1).map(d =>
+                `<option value="${d}" ${(org.billing_day_of_month || 1) === d ? "selected" : ""}>${d}</option>`
+              ).join("")}
+            </select>
+            <div class="form-hint">Credits reset on this day each month (1-28). Defaults to the creation day.</div>
+          </div>
+        </div>
+        <div class="form-row">
           <div class="form-group">
             <label>Auto-Send Min Confidence</label>
             <input type="number" id="s-confidence" value="${org.auto_send_min_confidence}" min="0" max="1" step="0.05" />
           </div>
-        </div>
+        </div>` : ""}
         <div class="toggle-row">
           <div>
             <div class="toggle-label">Auto-Send Enabled</div>
@@ -1460,6 +1534,28 @@ function renderSettingsTab(el, org) {
         </p>
         <button class="btn btn-danger" onclick="resetUsage()">Reset Monthly Usage Counter</button>
       </div>
+    </div>
+
+    <div class="card mb-4" style="border-color:rgba(59,130,246,0.3)">
+      <div class="card-header" style="border-color:rgba(59,130,246,0.3)">
+        <div class="card-title" style="color:var(--primary)">Renew Subscription</div>
+      </div>
+      <div class="card-body">
+        <p class="text-muted" style="font-size:13px;margin-bottom:12px">
+          Extend subscription from ${org.subscription_end_date ? new Date(org.subscription_end_date).toLocaleDateString() : "now"}.
+          Current plan: <strong>${org.subscription_plan || "monthly"}</strong>.
+        </p>
+        <div class="form-row" style="margin-bottom:12px">
+          <div class="form-group">
+            <label>Renew as</label>
+            <select id="renew-plan">
+              <option value="monthly" ${org.subscription_plan==="monthly"?"selected":""}>Monthly</option>
+              <option value="yearly" ${org.subscription_plan==="yearly"?"selected":""}>Yearly</option>
+            </select>
+          </div>
+        </div>
+        <button class="btn btn-primary" onclick="renewSubscription()">Renew Subscription</button>
+      </div>
     </div>` : ""}`;
 }
 
@@ -1481,11 +1577,17 @@ async function saveOrgSettings() {
     slug: document.getElementById("s-slug").value.trim(),
     ai_tone: document.getElementById("s-tone").value,
     subscription_tier: document.getElementById("s-tier").value,
-    auto_send_min_confidence: parseFloat(document.getElementById("s-confidence").value),
+    subscription_plan: document.getElementById("s-plan").value,
     auto_send_enabled: document.getElementById("s-autosend").checked,
   };
   if (isOwner) {
+    updates.auto_send_min_confidence = parseFloat(document.getElementById("s-confidence").value);
     updates.message_limit_per_month = parseInt(document.getElementById("s-limit").value);
+    updates.billing_day_of_month = parseInt(document.getElementById("s-billing-day").value);
+    const startVal = document.getElementById("s-start-date").value;
+    const endVal = document.getElementById("s-end-date").value;
+    updates.subscription_start_date = startVal ? new Date(startVal + "T00:00:00Z").toISOString() : null;
+    updates.subscription_end_date = endVal ? new Date(endVal + "T00:00:00Z").toISOString() : null;
   }
   try {
     await api("update_org", { org_id: currentOrgId, updates });
@@ -1493,6 +1595,18 @@ async function saveOrgSettings() {
     const { org } = await api("get_org", { org_id: currentOrgId });
     window._orgData.org = org;
     currentOrgName = org.name;
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function renewSubscription() {
+  if (!confirm("Renew subscription for this organization?")) return;
+  try {
+    const plan = document.getElementById("renew-plan").value;
+    const { new_end_date } = await api("renew_subscription", { org_id: currentOrgId, plan });
+    toast(`Subscription renewed until ${new Date(new_end_date).toLocaleDateString()}`, "success");
+    const { org } = await api("get_org", { org_id: currentOrgId });
+    window._orgData.org = org;
+    renderTab(currentTab);
   } catch (e) { toast(e.message, "error"); }
 }
 
@@ -1593,6 +1707,447 @@ async function executeEmergencyRestore() {
   } catch (e) { toast(e.message, "error"); }
 }
 
+// ── Payments Tab ─────────────────────────────────────────────────────────────
+
+let paypalSDKLoaded = false;
+
+function loadPayPalSDK() {
+  return new Promise((resolve, reject) => {
+    if (paypalSDKLoaded) { resolve(); return; }
+    const script = document.createElement("script");
+    script.src = `https://www.paypal.com/sdk/js?client-id=${CONFIG.paypalClientId}&currency=USD&intent=capture`;
+    script.onload = () => { paypalSDKLoaded = true; resolve(); };
+    script.onerror = () => reject(new Error("Failed to load PayPal SDK"));
+    document.head.appendChild(script);
+  });
+}
+
+// Preset definitions — owner sees all, salesperson sees only setup + yearly.
+// Each entry: { key, title, price, description, category, ownerOnly }
+const PAYMENT_PRESETS = [
+  { key: "setup",   title: "Setup Fee", price: 199,  description: "Setup Fee",            category: "setup",   ownerOnly: false, hint: "One-time setup" },
+  { key: "monthly", title: "Monthly",   price: 299,  description: "Monthly Plan",         category: "monthly", ownerOnly: true,  hint: "Per billing cycle" },
+  { key: "yearly",  title: "Yearly",    price: 3588, description: "Yearly Plan",          category: "yearly",  ownerOnly: false, hint: "14 months of service (2 months free)" },
+  { key: "addon",   title: "Addon",     price: 59,   description: "Message credit addon", category: "addon",   ownerOnly: true,  hint: "+1,000 message credits" },
+];
+
+function renderPaymentsTab(el, org) {
+  const presets = PAYMENT_PRESETS.filter(p => isOwner || !p.ownerOnly);
+
+  // Salesperson sees only Send Link buttons; owner sees Pay + Send Link.
+  const presetsHtml = presets.map(p => `
+    <div class="payment-option">
+      <div class="payment-option-title">${escHtml(p.title)}</div>
+      <div class="payment-option-price">$${p.price.toLocaleString()}</div>
+      <div class="payment-option-desc">${escHtml(p.hint)}</div>
+      <div class="payment-option-actions">
+        ${isOwner ? `<button class="btn btn-primary btn-sm" onclick="selectPayment(${p.price}, '${escAttr(p.description)}', '${p.category}')">Pay with PayPal</button>` : ""}
+        <button class="btn btn-secondary btn-sm" onclick="sendPaymentLink(${p.price}, '${escAttr(p.description)}', '${p.category}')">Send link</button>
+      </div>
+    </div>
+  `).join("");
+
+  el.innerHTML = `
+    <div class="card mb-4">
+      <div class="card-header"><div class="card-title">${isOwner ? "Quick Select" : "Payment Options"}</div></div>
+      <div class="card-body">
+        <div class="payment-options-grid">${presetsHtml}</div>
+      </div>
+    </div>
+
+    ${isOwner ? `
+    <div class="card mb-4">
+      <div class="card-header"><div class="card-title">Custom Amount</div></div>
+      <div class="card-body">
+        <div class="form-row">
+          <div class="form-group">
+            <label>Amount (USD)</label>
+            <input type="number" id="pay-custom-amount" min="1" step="0.01" placeholder="0.00" />
+          </div>
+          <div class="form-group">
+            <label>Reason</label>
+            <input type="text" id="pay-custom-reason" placeholder="e.g. Custom package, add-on..." />
+          </div>
+        </div>
+        <div class="flex-row">
+          <button class="btn btn-primary" onclick="selectCustomPayment('pay')">Pay with PayPal</button>
+          <button class="btn btn-secondary" onclick="selectCustomPayment('link')">Send link instead</button>
+        </div>
+      </div>
+    </div>` : ""}
+
+    <div id="paypal-container" style="display:none">
+      <div class="card mb-4">
+        <div class="card-header"><div class="card-title">Complete Payment</div></div>
+        <div class="card-body">
+          <div id="paypal-summary" style="margin-bottom:16px"></div>
+          <div id="paypal-buttons"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><div class="card-title">Payment History</div></div>
+      <div class="card-body">
+        <div id="payment-history-body"><div class="loading-overlay" style="position:relative"><div class="spinner"></div> Loading...</div></div>
+      </div>
+    </div>`;
+
+  loadPaymentHistory();
+}
+
+function escAttr(s) {
+  return String(s).replace(/'/g, "&#39;").replace(/"/g, "&quot;");
+}
+
+function selectPayment(amount, description, category) {
+  renderPayPalButtons(amount, description, category);
+}
+
+function selectCustomPayment(mode) {
+  const amount = parseFloat(document.getElementById("pay-custom-amount").value);
+  const reason = document.getElementById("pay-custom-reason").value.trim();
+
+  if (!amount || amount <= 0) { toast("Enter a valid amount", "error"); return; }
+  if (!reason) { toast("Enter a reason for the payment", "error"); return; }
+
+  if (mode === "link") {
+    sendPaymentLink(amount, reason, "custom");
+  } else {
+    renderPayPalButtons(amount, reason, "custom");
+  }
+}
+
+async function renderPayPalButtons(amount, description, category) {
+  const container = document.getElementById("paypal-container");
+  const buttonsEl = document.getElementById("paypal-buttons");
+  const summaryEl = document.getElementById("paypal-summary");
+  const orgName = currentOrgName;
+  const orgId = currentOrgId;
+
+  container.style.display = "";
+  buttonsEl.innerHTML = '<div class="loading-overlay" style="position:relative"><div class="spinner"></div> Loading PayPal...</div>';
+  summaryEl.innerHTML = `
+    <div style="font-size:14px;margin-bottom:8px">
+      <strong>${escHtml(orgName)}</strong> — ${escHtml(description)}
+    </div>
+    <div style="font-size:24px;font-weight:700;color:var(--primary)">
+      $${amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+    </div>`;
+
+  container.scrollIntoView({ behavior: "smooth", block: "start" });
+
+  try {
+    await loadPayPalSDK();
+    buttonsEl.innerHTML = "";
+
+    paypal.Buttons({
+      style: { layout: "vertical", color: "gold", shape: "rect", label: "pay" },
+      createOrder: async function() {
+        const r = await api("paypal_create_order", {
+          org_id: orgId, amount, description, category,
+        });
+        return r.id;
+      },
+      onApprove: async function(data) {
+        try {
+          const r = await api("paypal_capture_order", {
+            org_id: orgId,
+            order_id: data.orderID,
+            category,
+            amount,
+            description,
+          });
+          container.innerHTML = `
+            <div class="card mb-4">
+              <div class="card-body" style="text-align:center;padding:40px">
+                <div style="font-size:48px;margin-bottom:16px;color:var(--success)">&#10003;</div>
+                <div style="font-size:20px;font-weight:600;margin-bottom:8px">Payment Successful</div>
+                <div class="text-muted" style="margin-bottom:16px">
+                  $${amount.toLocaleString("en-US", { minimumFractionDigits: 2 })} received for ${escHtml(orgName)}
+                </div>
+                <div class="text-sm text-muted" style="margin-bottom:4px">Transaction: ${escHtml(r.capture_id || data.orderID)}</div>
+                <div class="text-sm text-muted">Payer: ${escHtml(r.payer_email || "N/A")}</div>
+                <button class="btn btn-secondary" style="margin-top:24px" onclick="switchTab('payments')">Collect Another Payment</button>
+              </div>
+            </div>`;
+          toast("Payment completed successfully", "success");
+          loadPaymentHistory();
+        } catch (e) {
+          toast("Capture failed: " + e.message, "error");
+        }
+      },
+      onCancel: function() {
+        toast("Payment cancelled", "default");
+      },
+      onError: function(err) {
+        console.error("PayPal error:", err);
+        toast("Payment failed — check console for details", "error");
+      },
+    }).render("#paypal-buttons");
+  } catch (e) {
+    buttonsEl.innerHTML = `<div class="alert alert-danger">Failed to load PayPal: ${e.message}</div>`;
+  }
+}
+
+// Holds the pending link state while the modal is open — avoids quoting/escaping
+// the URL through DOM attributes.
+let _pendingPaymentLink = null;
+
+async function sendPaymentLink(amount, description, category) {
+  const orgId = currentOrgId;
+  const orgName = currentOrgName;
+
+  const modal = document.createElement("div");
+  modal.className = "modal-backdrop";
+  modal.innerHTML = `
+    <div class="modal">
+      <div class="modal-header">
+        <div class="modal-title">Send payment link</div>
+        <button class="btn btn-ghost btn-sm" onclick="this.closest('.modal-backdrop').remove();_pendingPaymentLink=null;">✕</button>
+      </div>
+      <div class="modal-body">
+        <div style="font-size:14px;margin-bottom:4px">
+          <strong>${escHtml(orgName)}</strong> — ${escHtml(description)}
+        </div>
+        <div style="font-size:22px;font-weight:700;color:var(--primary);margin-bottom:16px">
+          $${amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+        </div>
+        <div id="link-modal-body">
+          <div class="loading-overlay" style="position:relative"><div class="spinner"></div> Generating PayPal link...</div>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  const bodyEl = modal.querySelector("#link-modal-body");
+
+  try {
+    const { approve_url } = await api("paypal_create_link", {
+      org_id: orgId, amount, description, category,
+    });
+
+    _pendingPaymentLink = { approve_url, amount, description };
+
+    const urlInput = document.createElement("input");
+    urlInput.type = "text";
+    urlInput.id = "link-modal-url";
+    urlInput.readOnly = true;
+    urlInput.value = approve_url;
+
+    bodyEl.innerHTML = `
+      <div class="form-group">
+        <label>Plaintext link (copy and send however you like)</label>
+      </div>
+      <div class="flex-row" style="margin-top:12px;flex-wrap:wrap;gap:8px">
+        <button class="btn btn-secondary" onclick="copyPaymentLink()">Copy link</button>
+        <button class="btn btn-primary" id="link-modal-email" onclick="emailPaymentLink()">Email this link</button>
+      </div>
+      <div id="link-modal-result" style="margin-top:12px"></div>`;
+
+    // Insert the URL input into the form-group so we don't need to escape it in HTML.
+    bodyEl.querySelector(".form-group").appendChild(urlInput);
+
+    loadPaymentHistory();
+  } catch (e) {
+    bodyEl.innerHTML = `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
+  }
+}
+
+function copyPaymentLink() {
+  const input = document.getElementById("link-modal-url");
+  if (!input) return;
+  input.select();
+  navigator.clipboard.writeText(input.value).then(
+    () => toast("Link copied to clipboard", "success"),
+    () => toast("Copy failed — select and copy manually", "error")
+  );
+}
+
+async function emailPaymentLink() {
+  if (!_pendingPaymentLink) return;
+  const { approve_url, amount, description } = _pendingPaymentLink;
+  const btn = document.getElementById("link-modal-email");
+  const resultEl = document.getElementById("link-modal-result");
+  if (btn) { btn.disabled = true; btn.innerHTML = '<div class="spinner"></div> Sending...'; }
+
+  try {
+    const { sent_to } = await api("send_payment_link", {
+      org_id: currentOrgId,
+      approve_url,
+      amount,
+      description,
+    });
+    if (sent_to && sent_to.length > 0) {
+      resultEl.innerHTML = `<div class="alert alert-success">Sent to: ${sent_to.map(escHtml).join(", ")}</div>`;
+      toast("Payment link emailed", "success");
+    } else {
+      resultEl.innerHTML = `<div class="alert alert-danger">No system-alert recipients configured and no email provider connected.</div>`;
+    }
+  } catch (e) {
+    resultEl.innerHTML = `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = "Email this link"; }
+  }
+}
+
+async function loadPaymentHistory() {
+  const bodyEl = document.getElementById("payment-history-body");
+  if (!bodyEl) return;
+
+  try {
+    const { payments } = await api("list_payments", { org_id: currentOrgId });
+    if (!payments || payments.length === 0) {
+      bodyEl.innerHTML = `<div class="text-muted" style="padding:16px;text-align:center">No payments yet.</div>`;
+      return;
+    }
+
+    window._paymentHistoryCache = payments;
+
+    const rows = payments.map(p => {
+      const dt = new Date(p.created_at).toLocaleString();
+      const amount = `$${Number(p.amount).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      const statusClass = p.status === "completed" ? "green"
+        : p.status === "pending_link" ? "yellow"
+        : p.status === "failed" ? "red" : "gray";
+      const actions = isOwner ? `
+        <td class="text-right" style="white-space:nowrap">
+          <button class="btn btn-secondary btn-sm" onclick="editPaymentEntry('${p.id}')">Edit</button>
+          <button class="btn btn-danger btn-sm" onclick="deletePaymentEntry('${p.id}')">Delete</button>
+        </td>` : "";
+      return `
+        <tr>
+          <td>${escHtml(dt)}</td>
+          <td>${escHtml(p.description)}${p.credits_added ? ` <span class="text-muted">(+${p.credits_added.toLocaleString()} credits)</span>` : ""}</td>
+          <td>${escHtml(p.category)}</td>
+          <td>${amount}</td>
+          <td><span class="badge badge-${statusClass}">${escHtml(p.status)}</span></td>
+          <td>${escHtml(p.payer_email || "—")}</td>
+          <td>${escHtml(p.created_by_name || "—")}</td>
+          ${actions}
+        </tr>`;
+    }).join("");
+
+    bodyEl.innerHTML = `
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th><th>Description</th><th>Category</th>
+              <th>Amount</th><th>Status</th><th>Payer</th><th>By</th>
+              ${isOwner ? "<th></th>" : ""}
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+  } catch (e) {
+    bodyEl.innerHTML = `<div class="alert alert-danger">Failed to load payments: ${escHtml(e.message)}</div>`;
+  }
+}
+
+async function deletePaymentEntry(paymentId) {
+  if (!isOwner) return;
+  const cache = window._paymentHistoryCache || [];
+  const p = cache.find(x => x.id === paymentId);
+  const label = p ? `${p.description} — $${Number(p.amount).toFixed(2)}` : "this payment";
+  if (!confirm(`Delete ${label}?\n\nThis only removes the history row. It does NOT refund PayPal, revert credits, or shorten the subscription.`)) return;
+  try {
+    await api("delete_payment", { org_id: currentOrgId, payment_id: paymentId });
+    toast("Payment entry deleted", "success");
+    loadPaymentHistory();
+  } catch (e) {
+    toast(`Delete failed: ${e.message}`, "error");
+  }
+}
+
+async function editPaymentEntry(paymentId) {
+  if (!isOwner) return;
+  const cache = window._paymentHistoryCache || [];
+  const p = cache.find(x => x.id === paymentId);
+  if (!p) return;
+
+  const modal = document.createElement("div");
+  modal.className = "modal-backdrop";
+  modal.innerHTML = `
+    <div class="modal">
+      <div class="modal-header">
+        <div class="modal-title">Edit Payment Entry</div>
+        <button class="btn btn-ghost btn-sm" onclick="this.closest('.modal-backdrop').remove()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-row">
+          <div class="form-group">
+            <label>Amount (USD)</label>
+            <input id="ep-amount" type="number" step="0.01" value="${Number(p.amount)}">
+          </div>
+          <div class="form-group">
+            <label>Category</label>
+            <select id="ep-category">
+              ${["setup","monthly","yearly","addon","custom","link_sent"].map(c =>
+                `<option value="${c}" ${c===p.category?"selected":""}>${c}</option>`).join("")}
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Description</label>
+            <input id="ep-description" type="text" value="${escAttr(p.description || "")}">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Status</label>
+            <select id="ep-status">
+              ${["completed","pending_link","failed","refunded"].map(s =>
+                `<option value="${s}" ${s===p.status?"selected":""}>${s}</option>`).join("")}
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Payer email</label>
+            <input id="ep-payer" type="text" value="${escAttr(p.payer_email || "")}">
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Credits added</label>
+            <input id="ep-credits" type="number" value="${p.credits_added ?? ""}">
+            <div class="form-hint text-muted" style="font-size:12px;margin-top:4px">Informational only. Editing this does NOT change the org's credit buckets.</div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="this.closest('.modal-backdrop').remove()">Cancel</button>
+        <button id="ep-save" class="btn btn-primary">Save changes</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+
+  modal.querySelector("#ep-save").onclick = async () => {
+    const creditsRaw = modal.querySelector("#ep-credits").value.trim();
+    const payload = {
+      org_id: currentOrgId,
+      payment_id: paymentId,
+      amount: Number(modal.querySelector("#ep-amount").value),
+      description: modal.querySelector("#ep-description").value.trim(),
+      category: modal.querySelector("#ep-category").value,
+      status: modal.querySelector("#ep-status").value,
+      payer_email: modal.querySelector("#ep-payer").value.trim() || null,
+      credits_added: creditsRaw === "" ? null : Number(creditsRaw),
+    };
+    const btn = modal.querySelector("#ep-save");
+    btn.disabled = true; btn.textContent = "Saving...";
+    try {
+      await api("update_payment", payload);
+      toast("Payment entry updated", "success");
+      modal.remove();
+      loadPaymentHistory();
+    } catch (e) {
+      toast(`Update failed: ${e.message}`, "error");
+      btn.disabled = false; btn.textContent = "Save changes";
+    }
+  };
+}
+
 // ── Sales Report (owners only) ────────────────────────────────────────────────
 
 async function renderSalesReport(main) {
@@ -1657,9 +2212,18 @@ function copySnippet() {
 
 const EVENT_TYPE_LABELS = {
   escalation: "Escalations",
+  "escalation:frustrated": "Frustrated",
+  "escalation:lead": "Leads",
+  "escalation:kb_gap": "KB Gap",
   usage_limit: "Usage Limit Alerts",
   system: "System Alerts",
 };
+
+const ESCALATION_SUBTYPES = [
+  { key: "escalation:frustrated", label: "Frustrated / Angry Customers" },
+  { key: "escalation:lead",      label: "Sales Leads" },
+  { key: "escalation:kb_gap",    label: "Knowledge Gaps" },
+];
 
 async function loadRecipients() {
   const el = document.getElementById("recipients-list");
@@ -1691,7 +2255,7 @@ async function loadRecipients() {
                 onchange="toggleRecipient('${r.id}', this.checked)">
               <span class="toggle-slider"></span>
             </label>
-            <button class="btn btn-ghost btn-sm" onclick="showEditRecipientModal('${r.id}','${escHtml(r.email)}','${escHtml(r.name || "")}',${JSON.stringify(r.notify_on)})">Edit</button>
+            <button class="btn btn-ghost btn-sm" onclick="showEditRecipientModal('${r.id}','${escHtml(r.email)}','${escHtml(r.name || "")}','${escHtml(JSON.stringify(r.notify_on))}')">Edit</button>
             <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="deleteRecipient('${r.id}')">Remove</button>
           </div>
         </div>`;
@@ -1704,10 +2268,35 @@ async function loadRecipients() {
 }
 
 function recipientModalHtml(title, id, email, name, notifyOn) {
-  const allTypes = ["escalation", "usage_limit", "system"];
-  const checkboxes = allTypes.map(t => `
+  const effectiveNotify = notifyOn || ["escalation", "usage_limit", "system"];
+
+  // Determine escalation parent/sub-type checked state
+  const hasLegacyEscalation = effectiveNotify.includes("escalation");
+  const hasAnySubType = ESCALATION_SUBTYPES.some(s => effectiveNotify.includes(s.key));
+  const escalationChecked = hasLegacyEscalation || hasAnySubType;
+
+  const subCheckboxes = ESCALATION_SUBTYPES.map(s => {
+    const checked = hasLegacyEscalation || effectiveNotify.includes(s.key);
+    return `
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:400;text-transform:none;letter-spacing:0;cursor:pointer;margin-bottom:6px;margin-left:28px;color:var(--text)">
+        <input type="checkbox" id="rn-${s.key}" ${checked ? "checked" : ""}
+          onchange="updateEscalationParent()">
+        ${s.label}
+      </label>`;
+  }).join("");
+
+  const checkboxes = `
     <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:400;text-transform:none;letter-spacing:0;cursor:pointer;margin-bottom:8px;color:var(--text)">
-      <input type="checkbox" id="rn-${t}" ${(notifyOn || allTypes).includes(t) ? "checked" : ""}>
+      <input type="checkbox" id="rn-escalation" ${escalationChecked ? "checked" : ""}
+        onchange="toggleEscalationSubTypes(this.checked)">
+      ${EVENT_TYPE_LABELS["escalation"]}
+    </label>
+    <div id="escalation-subtypes" style="display:${escalationChecked ? "block" : "none"};margin-bottom:8px">
+      ${subCheckboxes}
+    </div>
+  ` + ["usage_limit", "system"].map(t => `
+    <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:400;text-transform:none;letter-spacing:0;cursor:pointer;margin-bottom:8px;color:var(--text)">
+      <input type="checkbox" id="rn-${t}" ${effectiveNotify.includes(t) ? "checked" : ""}>
       ${EVENT_TYPE_LABELS[t]}
     </label>`).join("");
 
@@ -1742,6 +2331,24 @@ function recipientModalHtml(title, id, email, name, notifyOn) {
     </div>`;
 }
 
+function toggleEscalationSubTypes(checked) {
+  const container = document.getElementById("escalation-subtypes");
+  if (container) container.style.display = checked ? "block" : "none";
+  ["escalation:frustrated", "escalation:lead", "escalation:kb_gap"].forEach(key => {
+    const el = document.getElementById(`rn-${key}`);
+    if (el) el.checked = checked;
+  });
+}
+
+function updateEscalationParent() {
+  const anyChecked = ["escalation:frustrated", "escalation:lead", "escalation:kb_gap"]
+    .some(key => document.getElementById(`rn-${key}`)?.checked);
+  const parent = document.getElementById("rn-escalation");
+  if (parent) parent.checked = anyChecked;
+  const container = document.getElementById("escalation-subtypes");
+  if (container) container.style.display = anyChecked ? "block" : "none";
+}
+
 function showAddRecipientModal() {
   const modal = document.createElement("div");
   modal.className = "modal-backdrop";
@@ -1750,6 +2357,7 @@ function showAddRecipientModal() {
 }
 
 function showEditRecipientModal(id, email, name, notifyOn) {
+  notifyOn = typeof notifyOn === "string" ? JSON.parse(notifyOn) : notifyOn;
   const modal = document.createElement("div");
   modal.className = "modal-backdrop";
   modal.innerHTML = recipientModalHtml("Edit Recipient", id, email, name, notifyOn);
@@ -1759,8 +2367,25 @@ function showEditRecipientModal(id, email, name, notifyOn) {
 function getRecipientFormValues() {
   const email = document.getElementById("r-email").value.trim();
   const name = document.getElementById("r-name").value.trim();
-  const notifyOn = ["escalation", "usage_limit", "system"]
-    .filter(t => document.getElementById(`rn-${t}`)?.checked);
+
+  const notifyOn = [];
+
+  // Collect escalation sub-types if parent is checked
+  if (document.getElementById("rn-escalation")?.checked) {
+    const subTypes = ["escalation:frustrated", "escalation:lead", "escalation:kb_gap"]
+      .filter(key => document.getElementById(`rn-${key}`)?.checked);
+    // All 3 checked → store "escalation" (compact, auto-includes future sub-types)
+    if (subTypes.length === 3) {
+      notifyOn.push("escalation");
+    } else {
+      notifyOn.push(...subTypes);
+    }
+  }
+
+  ["usage_limit", "system"].forEach(t => {
+    if (document.getElementById(`rn-${t}`)?.checked) notifyOn.push(t);
+  });
+
   return { email, name, notifyOn };
 }
 

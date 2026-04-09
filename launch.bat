@@ -10,7 +10,7 @@ set PORT=47432
 python --version >nul 2>&1
 if %errorlevel% == 0 (
     echo Starting Horus Desk Dashboard on port %PORT%...
-    start "" "http://localhost :%PORT%"
+    start "" "http://localhost:%PORT%"
     python -m http.server %PORT%
     goto :end
 )

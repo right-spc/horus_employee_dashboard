@@ -2058,6 +2058,42 @@
         <option name="homepage" value="https://mksingh.dev/docs" />
         <option name="urlTemplate" value="https://mksingh.dev/r/{name}.json" />
       </RegistryConfigState>
+      <RegistryConfigState>
+        <option name="id" value="central-flowkit-ui" />
+        <option name="name" value="Flowkit-ui" />
+        <option name="namespace" value="@flowkit-ui" />
+        <option name="baseUrl" value="https://flowkit-ui.vzkiss.com/r" />
+        <option name="stylePath" value="/{name}.json" />
+        <option name="type" value="community" />
+        <option name="enabled" value="false" />
+        <option name="description" value="Opinionated, accessible components on Base UI and shadcn-style primitives — starting with a Creatable Combobox." />
+        <option name="homepage" value="https://flowkit-ui.vzkiss.com" />
+        <option name="urlTemplate" value="https://flowkit-ui.vzkiss.com/r/{name}.json" />
+      </RegistryConfigState>
+      <RegistryConfigState>
+        <option name="id" value="central-termcn" />
+        <option name="name" value="Termcn" />
+        <option name="namespace" value="@termcn" />
+        <option name="baseUrl" value="https://termcn.vercel.app/r" />
+        <option name="stylePath" value="/{name}.json" />
+        <option name="type" value="community" />
+        <option name="enabled" value="false" />
+        <option name="description" value="Beautiful terminal UIs, made simple. Ready to use, customizable terminal UI components for React." />
+        <option name="homepage" value="https://termcn.vercel.app" />
+        <option name="urlTemplate" value="https://termcn.vercel.app/r/{name}.json" />
+      </RegistryConfigState>
+      <RegistryConfigState>
+        <option name="id" value="central-remocn" />
+        <option name="name" value="Remocn" />
+        <option name="namespace" value="@remocn" />
+        <option name="baseUrl" value="https://www.remocn.dev/r" />
+        <option name="stylePath" value="/{name}.json" />
+        <option name="type" value="community" />
+        <option name="enabled" value="false" />
+        <option name="description" value="Production-ready components for Remotion - text animations, backgrounds, transitions, UI blocks, and full scene compositions" />
+        <option name="homepage" value="https://www.remocn.dev/" />
+        <option name="urlTemplate" value="https://www.remocn.dev/r/{name}.json" />
+      </RegistryConfigState>
     </registryConfigs>
   </component>
 </project>

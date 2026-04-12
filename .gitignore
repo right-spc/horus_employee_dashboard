@@ -1,0 +1,6 @@
+launch.sh
+launch.bat
+.DS_Store
+*.log
+.vscode/
+.idea/

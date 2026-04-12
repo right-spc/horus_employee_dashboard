@@ -31,29 +31,24 @@ async function api(action, params = {}) {
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
-async function doLogin() {
-  const email = document.getElementById("login-email").value.trim();
-  const password = document.getElementById("login-password").value;
+async function doGoogleLogin() {
   const errEl = document.getElementById("login-error");
   const btn = document.getElementById("login-btn");
 
-  if (!email || !password) {
-    errEl.innerHTML = '<div class="alert alert-danger">Email and password are required.</div>';
-    return;
-  }
-
   btn.disabled = true;
-  btn.innerHTML = '<div class="spinner"></div> Signing in...';
   errEl.innerHTML = "";
 
-  const { error } = await _supabase.auth.signInWithPassword({ email, password });
+  const { error } = await _supabase.auth.signInWithOAuth({
+    provider: "google",
+    options: { redirectTo: window.location.origin },
+  });
 
   if (error) {
     errEl.innerHTML = `<div class="alert alert-danger">${error.message}</div>`;
     btn.disabled = false;
-    btn.innerHTML = "Sign In";
   }
-  // On success, onAuthStateChange fires and handles the rest
+  // On success, browser redirects to Google, then back here.
+  // onAuthStateChange picks up the session from the URL fragment.
 }
 
 async function doLogout() {
@@ -108,8 +103,6 @@ function onLogout() {
   isOwner = false;
   document.getElementById("login-screen").style.display = "";
   document.getElementById("app-screen").style.display = "none";
-  document.getElementById("login-email").value = "";
-  document.getElementById("login-password").value = "";
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
@@ -230,8 +223,9 @@ async function renderOrgList(main) {
       const createdBy = org.created_by_name
         ? `<div class="text-xs text-subtle">${escHtml(org.created_by_name)}</div>` : "";
 
+      const searchKey = `${org.name} ${org.slug}`.toLowerCase();
       return `
-        <tr>
+        <tr data-search="${escHtml(searchKey)}">
           <td>
             <a onclick="navigate('org-detail','${org.id}','${escHtml(org.name)}')"
                class="org-link">
@@ -256,11 +250,17 @@ async function renderOrgList(main) {
     }).join("");
 
     main.querySelector(".card").innerHTML = `
+      <div class="card-body" style="padding-bottom:0;">
+        <input type="text" id="org-search" placeholder="Search by name or slug..."
+               oninput="filterTableRows('org-search','org-list-body','org-empty-msg')"
+               style="width:100%;max-width:400px;" />
+      </div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Organization</th><th>Email</th><th>Email AI</th><th>Widget</th><th>Subscription</th><th>Usage this month</th></tr></thead>
-          <tbody>${rows}</tbody>
+          <tbody id="org-list-body">${rows}</tbody>
         </table>
+        <div id="org-empty-msg" class="empty-state" style="display:none;"><p>No organizations match your search.</p></div>
       </div>`;
   } catch (e) {
     main.querySelector(".card").innerHTML =
@@ -322,7 +322,7 @@ function showNewOrgModal() {
         <div class="form-row">
           <div class="form-group">
             <label>Monthly Message Limit</label>
-            <input type="number" id="new-org-limit" value="7000" min="100" />
+            <input type="number" id="new-org-limit" value="7500" min="100" />
           </div>
           <div class="form-group">
             <label>Auto-Send Min Confidence</label>
@@ -428,7 +428,7 @@ function showNewDemoModal() {
         <div class="form-row">
           <div class="form-group">
             <label>Monthly Message Limit</label>
-            <input type="number" id="demo-limit" value="7000" min="100" />
+            <input type="number" id="demo-limit" value="7500" min="100" />
           </div>
           <div class="form-group">
             <label>Auto-Send Min Confidence</label>
@@ -501,6 +501,9 @@ async function renderOrgDetail(main) {
           <div class="page-title">${escHtml(org.name)}</div>
           <div class="page-subtitle">${escHtml(org.slug)}${org.created_by_name ? ` · Created by ${escHtml(org.created_by_name)}` : ""}</div>
         </div>
+        ${isOwner ? `<div class="flex-row">
+          <button class="btn btn-danger" onclick="deleteOrg()">Delete Organization</button>
+        </div>` : ""}
       </div>
       <div class="tabs">
         <button class="tab active" onclick="switchTab('overview')">Overview</button>
@@ -508,6 +511,7 @@ async function renderOrgDetail(main) {
         <button class="tab" onclick="switchTab('widget')">Widget</button>
         <button class="tab" onclick="switchTab('kb')">Knowledge Base</button>
         <button class="tab" onclick="switchTab('payments')">Payments</button>
+        ${isOwner ? `<button class="tab" onclick="switchTab('reports')">Reports</button>` : ""}
         <button class="tab" onclick="switchTab('settings')">Settings</button>
       </div>
       <div id="tab-content"></div>`;
@@ -548,8 +552,9 @@ async function renderDemoList(main) {
 
     const rows = demos.map(demo => {
       const widget = widgetMap[demo.id];
+      const searchKey = `${demo.name} ${demo.slug}`.toLowerCase();
       return `
-        <tr>
+        <tr data-search="${escHtml(searchKey)}">
           <td>
             <a onclick="navigate('demo-detail','${demo.id}','${escHtml(demo.name)}',true)"
                class="org-link">
@@ -563,11 +568,17 @@ async function renderDemoList(main) {
     }).join("");
 
     main.querySelector(".card").innerHTML = `
+      <div class="card-body" style="padding-bottom:0;">
+        <input type="text" id="demo-search" placeholder="Search by name or slug..."
+               oninput="filterTableRows('demo-search','demo-list-body','demo-empty-msg')"
+               style="width:100%;max-width:400px;" />
+      </div>
       <div class="table-wrap">
         <table>
           <thead><tr><th>Demo</th><th>AI Tone</th><th>Widget</th></tr></thead>
-          <tbody>${rows}</tbody>
+          <tbody id="demo-list-body">${rows}</tbody>
         </table>
+        <div id="demo-empty-msg" class="empty-state" style="display:none;"><p>No demos match your search.</p></div>
       </div>`;
   } catch (e) {
     main.querySelector(".card").innerHTML =
@@ -604,12 +615,15 @@ async function renderDemoDetail(main) {
         <div class="flex-row">
           <button class="btn btn-secondary" onclick="resetDemo()">Reset to Default</button>
           ${isOwner ? `<button class="btn btn-secondary" onclick="saveDemoDefaults()">Save as Default</button>` : ""}
+          ${isOwner ? `<button class="btn btn-danger" onclick="deleteDemo()">Delete Demo</button>` : ""}
         </div>
       </div>
       <div class="tabs">
         <button class="tab active" onclick="switchTab('overview')">Overview</button>
         <button class="tab" onclick="switchTab('widget')">Widget</button>
         <button class="tab" onclick="switchTab('kb')">Knowledge Base</button>
+        <button class="tab" onclick="switchTab('notifications')">Notifications</button>
+        ${isOwner ? `<button class="tab" onclick="switchTab('reports')">Reports</button>` : ""}
         <button class="tab" onclick="switchTab('settings')">Settings</button>
       </div>
       <div id="tab-content"></div>`;
@@ -637,6 +651,46 @@ async function saveDemoDefaults() {
   try {
     await api("save_demo_defaults", { org_id: currentOrgId });
     toast("Defaults saved", "success");
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function deleteDemo() {
+  if (!confirm(`Permanently delete demo "${currentOrgName}"? This cannot be undone.`)) return;
+  if (!confirm("Are you sure? All conversations, KB documents, widget config, and notification recipients for this demo will be removed.")) return;
+  try {
+    await api("delete_demo", { org_id: currentOrgId });
+    toast("Demo deleted", "success");
+    navigate("demos");
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function deleteOrg() {
+  const org = window._orgData?.org;
+  if (!org) return;
+  if (org.is_demo) {
+    toast("Use the Delete Demo button for demo organizations", "error");
+    return;
+  }
+  const warning = `Permanently delete organization "${org.name}"?\n\n` +
+    `This will remove ALL of the following for this organization:\n` +
+    `  • All conversations and messages\n` +
+    `  • All contacts\n` +
+    `  • All KB documents and chunks\n` +
+    `  • Connected email provider and tokens\n` +
+    `  • Widget config and notification recipients\n` +
+    `  • Payment history and analytics\n\n` +
+    `This cannot be undone.`;
+  if (!confirm(warning)) return;
+  const typed = prompt(`To confirm, type the organization slug exactly:\n\n${org.slug}`);
+  if (typed === null) return;
+  if (typed.trim() !== org.slug) {
+    toast("Slug did not match — deletion cancelled", "error");
+    return;
+  }
+  try {
+    await api("delete_org", { org_id: currentOrgId, confirm_slug: org.slug });
+    toast("Organization deleted", "success");
+    navigate("orgs");
   } catch (e) { toast(e.message, "error"); }
 }
 
@@ -753,7 +807,9 @@ async function renderTab() {
     else if (currentTab === "email") renderEmailTab(el, org, providers);
     else if (currentTab === "widget") renderWidgetTab(el, widget, org);
     else if (currentTab === "kb") renderKbTab(el, kbDocs, org);
+    else if (currentTab === "notifications") renderNotificationsTab(el, org);
     else if (currentTab === "payments") renderPaymentsTab(el, org);
+    else if (currentTab === "reports") renderReportsTab(el, org);
     else if (currentTab === "settings") renderSettingsTab(el, org);
   } catch (e) {
     console.error("renderTab error:", e);
@@ -768,8 +824,14 @@ function renderOverviewTab(el, org, providers, widget) {
     ? Math.round((org.messages_used_this_month / org.message_limit_per_month) * 100) : 0;
   const fillClass = pct >= 100 ? "danger" : pct >= 80 ? "warning" : "";
   const provider = providers[0];
-  const resetDate = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 1)
-    .toLocaleDateString("en-US", { month: "long", day: "numeric" });
+  const cycleDay = org.subscription_end_date
+    ? new Date(org.subscription_end_date).getUTCDate()
+    : (org.billing_day_of_month || 1);
+  const now = new Date();
+  const resetDateObj = now.getDate() < cycleDay
+    ? new Date(now.getFullYear(), now.getMonth(), cycleDay)
+    : new Date(now.getFullYear(), now.getMonth() + 1, cycleDay);
+  const resetDate = resetDateObj.toLocaleDateString("en-US", { month: "long", day: "numeric" });
 
   el.innerHTML = `
     <div class="stat-grid">
@@ -783,11 +845,11 @@ function renderOverviewTab(el, org, providers, widget) {
         <div class="stat-value stat-value-md">${resetDate}</div>
         <div class="stat-sub">Next billing cycle</div>
       </div>
-      <div class="stat-card">
+      ${!currentIsDemo ? `<div class="stat-card">
         <div class="stat-label">Email</div>
         <div class="stat-value stat-value-sm" style="word-break:break-all;line-height:1.4">${provider ? (() => { const at = provider.provider_account_email.indexOf("@"); return at === -1 ? escHtml(provider.provider_account_email) : `${escHtml(provider.provider_account_email.slice(0, at))}<br><span style="font-size:12px;opacity:0.8">${escHtml(provider.provider_account_email.slice(at))}</span>`; })() : "—"}</div>
         <div class="stat-sub">${provider ? `<span class="badge ${provider.status === "active" ? "badge-green" : "badge-red"}">${provider.status}</span>` : "Not connected"}</div>
-      </div>
+      </div>` : ""}
       <div class="stat-card">
         <div class="stat-label">Widget</div>
         <div class="stat-value stat-value-lg">${widget ? (widget.enabled ? "Enabled" : "Disabled") : "Not set up"}</div>
@@ -808,7 +870,7 @@ function renderOverviewTab(el, org, providers, widget) {
             <span class="toggle-slider"></span>
           </label>
         </div>
-        <div class="toggle-row">
+        ${!currentIsDemo ? `<div class="toggle-row">
           <div>
             <div class="toggle-label">Email AI Responses</div>
             <div class="toggle-desc">Process inbound emails with AI (disable to save messages without AI)</div>
@@ -818,7 +880,7 @@ function renderOverviewTab(el, org, providers, widget) {
               onchange="toggleEmailAi(this.checked)">
             <span class="toggle-slider"></span>
           </label>
-        </div>
+        </div>` : ""}
         <div class="toggle-row" style="border-bottom:none">
           <div>
             <div class="toggle-label">Auto-Send</div>
@@ -939,6 +1001,32 @@ async function connectEmail(provider) {
 function copyAuthLink() { navigator.clipboard.writeText(window._authLink); toast("Copied", "success"); }
 function openAuthLink() { window.open(window._authLink, "_blank"); }
 
+// ── Notifications Tab (demos only) ───────────────────────────────────────────
+
+function renderNotificationsTab(el, org) {
+  el.innerHTML = `
+    <div class="card mb-4">
+      <div class="card-header">
+        <div class="card-title">Notification Recipients</div>
+        ${isOwner ? `<button class="btn btn-primary btn-sm" onclick="showAddRecipientModal()">
+          ${ICONS.plus} Add Recipient
+        </button>` : ""}
+      </div>
+      <div class="card-body card-body-flush">
+        <div id="recipients-list">
+          <div class="loading-overlay"><div class="spinner"></div></div>
+        </div>
+      </div>
+      <div class="card-body text-sm text-muted" style="padding:10px 16px;border-top:1px solid var(--border)">
+        ${isOwner
+          ? "Add the people who should receive escalations and alerts for this demo."
+          : "Read-only — only owners can modify notification recipients."}
+      </div>
+    </div>`;
+
+  loadRecipients();
+}
+
 // ── Widget Tab ────────────────────────────────────────────────────────────────
 
 function renderWidgetTab(el, widget, org) {
@@ -1002,7 +1090,7 @@ function renderWidgetTab(el, widget, org) {
         </label>` : `
         <span class="badge badge-${widget.enabled ? "green" : "gray"}">${widget.enabled ? "Enabled" : "Disabled"}</span>`}
       </div>
-      <div class="card-body">
+      ${!(currentIsDemo && !isOwner) ? `<div class="card-body">
         <div class="form-group">
           <label>API Key</label>
           <div class="flex-row" style="gap:10px">
@@ -1013,7 +1101,7 @@ function renderWidgetTab(el, widget, org) {
             </button>
           </div>
         </div>
-      </div>
+      </div>` : ""}
     </div>
 
     <div class="card mb-4">
@@ -1063,7 +1151,7 @@ function renderWidgetTab(el, widget, org) {
       </div>
     </div>
 
-    <div class="card mb-4">
+    ${!(currentIsDemo && !isOwner) ? `<div class="card mb-4">
       <div class="card-header"><div class="card-title">Domain Whitelist</div></div>
       <div class="card-body">
         <div class="form-group">
@@ -1074,7 +1162,7 @@ function renderWidgetTab(el, widget, org) {
           Save Widget Settings
         </button>
       </div>
-    </div>
+    </div>` : ""}
 
     <div class="card mb-4">
       <div class="card-header"><div class="card-title">Pre-Chat Form</div></div>
@@ -1183,26 +1271,30 @@ async function saveWidgetConfig(widgetId) {
     if (dEl) dark[key] = dEl.value;
   });
 
-  const domains = (document.getElementById("w-domains").value || "")
-    .split(",").map(d => d.trim().replace(/^https?:\/\//, "").replace(/\/$/, "")).filter(Boolean);
+  const domainsEl = document.getElementById("w-domains");
+  const domains = domainsEl
+    ? (domainsEl.value || "").split(",").map(d => d.trim().replace(/^https?:\/\//, "").replace(/\/$/, "")).filter(Boolean)
+    : null;
 
   const captureFields = ["name","email","phone"].filter(f => document.getElementById(`w-field-${f}`)?.checked);
   const requiredFields = ["name","email","phone"].filter(f => document.getElementById(`w-req-${f}`)?.checked);
 
   try {
+    const updates = {
+      header_title: document.getElementById("w-header-title").value.trim(),
+      welcome_message: document.getElementById("w-welcome").value.trim(),
+      position: document.getElementById("w-position").value,
+      form_title: document.getElementById("w-form-title")?.value.trim(),
+      form_subtitle: document.getElementById("w-form-subtitle")?.value.trim(),
+      capture_fields: captureFields,
+      required_fields: requiredFields,
+      colors: { light, dark },
+    };
+    if (domains !== null) updates.allowed_domains = domains;
+
     await api("update_widget", {
       org_id: currentOrgId,
-      updates: {
-        header_title: document.getElementById("w-header-title").value.trim(),
-        welcome_message: document.getElementById("w-welcome").value.trim(),
-        position: document.getElementById("w-position").value,
-        form_title: document.getElementById("w-form-title")?.value.trim(),
-        form_subtitle: document.getElementById("w-form-subtitle")?.value.trim(),
-        allowed_domains: domains,
-        capture_fields: captureFields,
-        required_fields: requiredFields,
-        colors: { light, dark },
-      },
+      updates,
     });
     toast("Widget settings saved", "success");
   } catch (e) { toast(e.message, "error"); }
@@ -1477,19 +1569,33 @@ function renderSettingsTab(el, org) {
             <input type="number" id="s-limit" value="${org.message_limit_per_month}" min="100" />
           </div>
           <div class="form-group">
-            <label>Billing Day of Month</label>
+            <label>Payment Due Day</label>
             <select id="s-billing-day">
               ${Array.from({length: 28}, (_, i) => i + 1).map(d =>
                 `<option value="${d}" ${(org.billing_day_of_month || 1) === d ? "selected" : ""}>${d}</option>`
               ).join("")}
             </select>
-            <div class="form-hint">Credits reset on this day each month (1-28). Defaults to the creation day.</div>
+            <div class="form-hint">Day of month when payment is due (1-28). If different from the subscription cycle day, payment covers the next cycle in advance.</div>
           </div>
         </div>
         <div class="form-row">
           <div class="form-group">
             <label>Auto-Send Min Confidence</label>
             <input type="number" id="s-confidence" value="${org.auto_send_min_confidence}" min="0" max="1" step="0.05" />
+          </div>
+          <div class="form-group">
+            <label>Message Retention</label>
+            <select id="s-retention">
+              ${[
+                { v: 3,   label: "3 days" },
+                { v: 7,   label: "7 days" },
+                { v: 30,  label: "30 days" },
+                { v: 365, label: "1 year (default)" },
+              ].map(o =>
+                `<option value="${o.v}" ${(org.retention_days ?? 365) === o.v ? "selected" : ""}>${o.label}</option>`
+              ).join("")}
+            </select>
+            <div class="form-hint">Messages older than this are deleted automatically each night. Conversations with no remaining messages are also removed.</div>
           </div>
         </div>` : ""}
         <div class="toggle-row">
@@ -1582,6 +1688,7 @@ async function saveOrgSettings() {
   };
   if (isOwner) {
     updates.auto_send_min_confidence = parseFloat(document.getElementById("s-confidence").value);
+    updates.retention_days = parseInt(document.getElementById("s-retention").value, 10);
     updates.message_limit_per_month = parseInt(document.getElementById("s-limit").value);
     updates.billing_day_of_month = parseInt(document.getElementById("s-billing-day").value);
     const startVal = document.getElementById("s-start-date").value;
@@ -1635,6 +1742,335 @@ async function resetUsage() {
     const { org } = await api("get_org", { org_id: currentOrgId });
     window._orgData.org = org;
   } catch (e) { toast(e.message, "error"); }
+}
+
+// ── Reports Tab ──────────────────────────────────────────────────────────────
+// On-demand and scheduled exports of an org's message history as CSV.
+
+const FREQUENCY_LABELS = {
+  daily: "Daily (last 1 day)",
+  weekly: "Weekly (last 7 days)",
+  monthly: "Monthly (last 30 days)",
+  quarterly: "Quarterly (last 90 days)",
+};
+
+function renderReportsTab(el, org) {
+  // Default range: last 7 days through today.
+  const today = new Date();
+  const sevenAgo = new Date(today.getTime() - 7 * 86400000);
+  const fmt = (d) => d.toISOString().slice(0, 10);
+
+  el.innerHTML = `
+    <div class="card mb-4">
+      <div class="card-header"><div class="card-title">Export Messages</div></div>
+      <div class="card-body">
+        <p class="text-muted" style="font-size:13px;margin-bottom:16px">
+          Generate a CSV of this organization's messages and email a download link to a recipient. Links expire after 7 days.
+        </p>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Start Date</label>
+            <input type="date" id="r-start" value="${fmt(sevenAgo)}" />
+          </div>
+          <div class="form-group">
+            <label>End Date</label>
+            <input type="date" id="r-end" value="${fmt(today)}" />
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Send To</label>
+            <select id="r-recipient">
+              <option value="">Loading recipients…</option>
+            </select>
+            <div class="form-hint">Defaults to the connected inbox. Add notification recipients in the Settings tab.</div>
+          </div>
+        </div>
+        <div style="margin-top:16px">
+          <button class="btn btn-primary" id="r-send-btn" onclick="runOnDemandExport()">Send Export</button>
+        </div>
+        <div id="r-status" style="margin-top:16px"></div>
+      </div>
+    </div>
+
+    <div class="card mb-4">
+      <div class="card-header" style="display:flex;justify-content:space-between;align-items:center">
+        <div class="card-title">Scheduled Exports</div>
+        <button class="btn btn-secondary btn-sm" onclick="showNewScheduleModal()">+ New Schedule</button>
+      </div>
+      <div class="card-body">
+        <div id="r-schedules">
+          <div class="text-muted" style="font-size:13px">Loading schedules…</div>
+        </div>
+      </div>
+    </div>`;
+
+  loadExportRecipients(org.id);
+  refreshSchedules(org.id);
+}
+
+async function loadExportRecipients(orgId) {
+  try {
+    const { default_email, notification_recipients } = await api(
+      "list_export_recipients",
+      { org_id: orgId }
+    );
+    const select = document.getElementById("r-recipient");
+    if (!select) return;
+
+    const options = [];
+    if (default_email) {
+      options.push(
+        `<option value="${escHtml(default_email)}">${escHtml(default_email)} (connected inbox)</option>`
+      );
+    }
+    for (const r of notification_recipients) {
+      const label = r.name ? `${r.name} <${r.email}>` : r.email;
+      options.push(`<option value="${escHtml(r.email)}">${escHtml(label)}</option>`);
+    }
+    if (options.length === 0) {
+      options.push(`<option value="" disabled>No recipients configured</option>`);
+    }
+    select.innerHTML = options.join("");
+  } catch (e) {
+    const select = document.getElementById("r-recipient");
+    if (select) {
+      select.innerHTML = `<option value="" disabled>Error: ${escHtml(e.message)}</option>`;
+    }
+  }
+}
+
+async function runOnDemandExport() {
+  const startVal = document.getElementById("r-start").value;
+  const endVal = document.getElementById("r-end").value;
+  const recipient = document.getElementById("r-recipient").value;
+  const statusEl = document.getElementById("r-status");
+  const btn = document.getElementById("r-send-btn");
+
+  if (!startVal || !endVal) {
+    statusEl.innerHTML = `<div class="alert alert-danger">Pick a start and end date.</div>`;
+    return;
+  }
+  if (!recipient) {
+    statusEl.innerHTML = `<div class="alert alert-danger">Pick a recipient.</div>`;
+    return;
+  }
+  if (startVal > endVal) {
+    statusEl.innerHTML = `<div class="alert alert-danger">Start date must be on or before end date.</div>`;
+    return;
+  }
+
+  // End-of-day boundary so "today through today" returns today's messages.
+  const start_date = new Date(startVal + "T00:00:00Z").toISOString();
+  const end_date = new Date(endVal + "T23:59:59.999Z").toISOString();
+
+  btn.disabled = true;
+  btn.textContent = "Sending…";
+  statusEl.innerHTML = `<div class="text-muted" style="font-size:13px">Generating CSV and sending email…</div>`;
+
+  try {
+    const res = await api("export_messages", {
+      org_id: currentOrgId,
+      start_date,
+      end_date,
+      recipient_email: recipient,
+    });
+    const linkHtml = `<a href="${escHtml(res.url)}" target="_blank" rel="noopener">Download CSV</a>`;
+    const emailNote = res.email_sent
+      ? ` Email sent to <strong>${escHtml(recipient)}</strong>.`
+      : (res.email_error
+          ? ` (Email failed: ${escHtml(res.email_error)})`
+          : "");
+    statusEl.innerHTML = `
+      <div class="alert alert-success">
+        Export ready — ${res.message_count.toLocaleString()} message(s).
+        ${linkHtml}.${emailNote}
+        <div class="text-muted" style="font-size:12px;margin-top:4px">Link expires ${new Date(res.expires_at).toLocaleString()}.</div>
+      </div>`;
+    toast("Export sent", "success");
+  } catch (e) {
+    statusEl.innerHTML = `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
+    toast(e.message, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Send Export";
+  }
+}
+
+async function refreshSchedules(orgId) {
+  const container = document.getElementById("r-schedules");
+  if (!container) return;
+  try {
+    const { schedules } = await api("list_export_schedules", { org_id: orgId });
+    if (!schedules || schedules.length === 0) {
+      container.innerHTML = `
+        <div class="empty-state" style="padding:24px">
+          <p class="text-muted" style="font-size:13px">
+            No scheduled exports yet. Click "+ New Schedule" to set one up.
+          </p>
+        </div>`;
+      return;
+    }
+
+    const rows = schedules.map((s) => {
+      const freqLabel = FREQUENCY_LABELS[s.frequency] || s.frequency;
+      const nextRun = s.next_run_at ? new Date(s.next_run_at).toLocaleString() : "—";
+      const lastRun = s.last_run_at ? new Date(s.last_run_at).toLocaleString() : "Never";
+      const statusBadge = !s.last_run_status
+        ? `<span class="badge">—</span>`
+        : s.last_run_status === "success"
+          ? `<span class="badge badge-green">Success</span>`
+          : `<span class="badge badge-red" title="${escHtml(s.last_run_error || '')}">Error</span>`;
+      const activeBadge = s.is_active
+        ? `<span class="badge badge-blue">Active</span>`
+        : `<span class="badge">Paused</span>`;
+      const toggleLabel = s.is_active ? "Pause" : "Resume";
+      return `
+        <tr>
+          <td>${escHtml(freqLabel)} ${activeBadge}</td>
+          <td>${escHtml(s.recipient_email)}</td>
+          <td>${escHtml(nextRun)}</td>
+          <td>${escHtml(lastRun)}</td>
+          <td>${statusBadge}</td>
+          <td style="white-space:nowrap">
+            <button class="btn btn-ghost btn-sm" onclick="toggleSchedule('${s.id}', ${!s.is_active})">${toggleLabel}</button>
+            <button class="btn btn-ghost btn-sm" onclick="deleteSchedule('${s.id}')">Delete</button>
+          </td>
+        </tr>`;
+    }).join("");
+
+    container.innerHTML = `
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Frequency</th>
+              <th>Recipient</th>
+              <th>Next Run</th>
+              <th>Last Run</th>
+              <th>Status</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+  } catch (e) {
+    container.innerHTML = `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
+  }
+}
+
+function showNewScheduleModal() {
+  const modal = document.createElement("div");
+  modal.className = "modal-backdrop";
+  modal.innerHTML = `
+    <div class="modal">
+      <div class="modal-header">
+        <div class="modal-title">New Scheduled Export</div>
+        <button class="btn btn-ghost btn-sm" onclick="this.closest('.modal-backdrop').remove()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-row">
+          <div class="form-group">
+            <label>Frequency</label>
+            <select id="new-sch-frequency">
+              <option value="daily">Daily (last 1 day)</option>
+              <option value="weekly" selected>Weekly (last 7 days)</option>
+              <option value="monthly">Monthly (last 30 days)</option>
+              <option value="quarterly">Quarterly (last 90 days)</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Send To</label>
+            <select id="new-sch-recipient">
+              <option value="">Loading recipients…</option>
+            </select>
+            <div class="form-hint">Each scheduled run emails a fresh signed download link to this address.</div>
+          </div>
+        </div>
+        <div id="new-sch-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="this.closest('.modal-backdrop').remove()">Cancel</button>
+        <button class="btn btn-primary" id="create-sch-btn" onclick="createSchedule()">Create Schedule</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+
+  // Populate recipient dropdown by reusing the same lookup
+  api("list_export_recipients", { org_id: currentOrgId })
+    .then(({ default_email, notification_recipients }) => {
+      const select = document.getElementById("new-sch-recipient");
+      if (!select) return;
+      const options = [];
+      if (default_email) {
+        options.push(`<option value="${escHtml(default_email)}">${escHtml(default_email)} (connected inbox)</option>`);
+      }
+      for (const r of notification_recipients) {
+        const label = r.name ? `${r.name} <${r.email}>` : r.email;
+        options.push(`<option value="${escHtml(r.email)}">${escHtml(label)}</option>`);
+      }
+      if (options.length === 0) {
+        options.push(`<option value="" disabled>No recipients configured</option>`);
+      }
+      select.innerHTML = options.join("");
+    })
+    .catch((e) => {
+      const select = document.getElementById("new-sch-recipient");
+      if (select) select.innerHTML = `<option value="" disabled>Error: ${escHtml(e.message)}</option>`;
+    });
+}
+
+async function createSchedule() {
+  const frequency = document.getElementById("new-sch-frequency").value;
+  const recipient_email = document.getElementById("new-sch-recipient").value;
+  const errEl = document.getElementById("new-sch-error");
+  const btn = document.getElementById("create-sch-btn");
+
+  if (!recipient_email) {
+    errEl.innerHTML = `<div class="alert alert-danger">Pick a recipient.</div>`;
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = "Creating…";
+  try {
+    await api("create_export_schedule", {
+      org_id: currentOrgId,
+      frequency,
+      recipient_email,
+    });
+    document.querySelector(".modal-backdrop")?.remove();
+    toast("Schedule created", "success");
+    refreshSchedules(currentOrgId);
+  } catch (e) {
+    errEl.innerHTML = `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
+    btn.disabled = false;
+    btn.textContent = "Create Schedule";
+  }
+}
+
+async function toggleSchedule(scheduleId, isActive) {
+  try {
+    await api("update_export_schedule", { schedule_id: scheduleId, is_active: isActive });
+    toast(isActive ? "Schedule resumed" : "Schedule paused", "success");
+    refreshSchedules(currentOrgId);
+  } catch (e) {
+    toast(e.message, "error");
+  }
+}
+
+async function deleteSchedule(scheduleId) {
+  if (!confirm("Delete this scheduled export? This cannot be undone.")) return;
+  try {
+    await api("delete_export_schedule", { schedule_id: scheduleId });
+    toast("Schedule deleted", "success");
+    refreshSchedules(currentOrgId);
+  } catch (e) {
+    toast(e.message, "error");
+  }
 }
 
 // ── Emergency Kill Switch ─────────────────────────────────────────────────────
@@ -1743,6 +2179,7 @@ function renderPaymentsTab(el, org) {
       <div class="payment-option-actions">
         ${isOwner ? `<button class="btn btn-primary btn-sm" onclick="selectPayment(${p.price}, '${escAttr(p.description)}', '${p.category}')">Pay with PayPal</button>` : ""}
         <button class="btn btn-secondary btn-sm" onclick="sendPaymentLink(${p.price}, '${escAttr(p.description)}', '${p.category}')">Send link</button>
+        <button class="btn btn-secondary btn-sm" onclick="sendToDashboard(${p.price}, '${escAttr(p.description)}', '${p.category}')">Send to dashboard</button>
       </div>
     </div>
   `).join("");
@@ -1772,6 +2209,7 @@ function renderPaymentsTab(el, org) {
         <div class="flex-row">
           <button class="btn btn-primary" onclick="selectCustomPayment('pay')">Pay with PayPal</button>
           <button class="btn btn-secondary" onclick="selectCustomPayment('link')">Send link instead</button>
+          <button class="btn btn-secondary" onclick="selectCustomPayment('dashboard')">Send to dashboard</button>
         </div>
       </div>
     </div>` : ""}
@@ -1813,8 +2251,25 @@ function selectCustomPayment(mode) {
 
   if (mode === "link") {
     sendPaymentLink(amount, reason, "custom");
+  } else if (mode === "dashboard") {
+    sendToDashboard(amount, reason, "custom");
   } else {
     renderPayPalButtons(amount, reason, "custom");
+  }
+}
+
+async function sendToDashboard(amount, description, category) {
+  try {
+    await api("create_dashboard_invoice", {
+      org_id: currentOrgId,
+      amount,
+      description,
+      category,
+    });
+    toast("Invoice sent to customer dashboard", "success");
+    loadPaymentHistory();
+  } catch (e) {
+    toast(e.message, "error");
   }
 }
 
@@ -2237,6 +2692,8 @@ async function loadRecipients() {
       return;
     }
 
+    const showActions = !(currentIsDemo && !isOwner);
+
     const rows = recipients.map(r => {
       const tags = (r.notify_on || []).map(t =>
         `<span class="badge badge-blue" style="margin-right:4px">${EVENT_TYPE_LABELS[t] || t}</span>`
@@ -2249,7 +2706,7 @@ async function loadRecipients() {
             ${r.name ? `<div class="text-sm text-muted">${escHtml(r.email)}</div>` : ""}
             <div style="margin-top:6px">${tags || '<span class="text-sm text-muted">No notifications</span>'}</div>
           </div>
-          <div class="flex-row">
+          ${showActions ? `<div class="flex-row">
             <label class="toggle" title="${r.is_active ? "Active" : "Disabled"}">
               <input type="checkbox" ${r.is_active ? "checked" : ""}
                 onchange="toggleRecipient('${r.id}', this.checked)">
@@ -2257,7 +2714,9 @@ async function loadRecipients() {
             </label>
             <button class="btn btn-ghost btn-sm" onclick="showEditRecipientModal('${r.id}','${escHtml(r.email)}','${escHtml(r.name || "")}','${escHtml(JSON.stringify(r.notify_on))}')">Edit</button>
             <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="deleteRecipient('${r.id}')">Remove</button>
-          </div>
+          </div>` : `<div class="flex-row">
+            <span class="badge ${r.is_active ? "badge-green" : "badge-gray"}">${r.is_active ? "Active" : "Disabled"}</span>
+          </div>`}
         </div>`;
     }).join("");
 
@@ -2467,6 +2926,27 @@ function escHtml(str) {
   return String(str)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+// Filter <tr> rows in a tbody by matching a query against their data-search attribute.
+// Rows whose data-search contains every whitespace-separated term are shown.
+function filterTableRows(inputId, tbodyId, emptyMsgId) {
+  const input = document.getElementById(inputId);
+  const tbody = document.getElementById(tbodyId);
+  if (!input || !tbody) return;
+  const query = input.value.trim().toLowerCase();
+  const terms = query.split(/\s+/).filter(Boolean);
+  let visible = 0;
+  for (const row of tbody.querySelectorAll("tr")) {
+    const hay = row.dataset.search || "";
+    const match = terms.every(t => hay.includes(t));
+    row.style.display = match ? "" : "none";
+    if (match) visible++;
+  }
+  if (emptyMsgId) {
+    const msg = document.getElementById(emptyMsgId);
+    if (msg) msg.style.display = visible === 0 && query.length > 0 ? "" : "none";
+  }
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────

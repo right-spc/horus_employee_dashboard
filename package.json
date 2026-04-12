@@ -1,0 +1,26 @@
+{
+  "name": "horus_employee_dashboard",
+  "version": "1.0.0",
+  "description": "",
+  "main": "config.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/right-spc/horus_employee_dashboard.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/right-spc/horus_employee_dashboard/issues"
+  },
+  "homepage": "https://github.com/right-spc/horus_employee_dashboard#readme",
+  "devDependencies": {
+    "vite": "^8.0.8"
+  }
+}

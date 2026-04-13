@@ -1076,7 +1076,7 @@ function renderWidgetTab(el, widget, org) {
     	apiKey: '${widget.api_key}'
   	};
 	<\/script>
-	<script src="horusdesk.com/widget.js" async><\/script>`;
+	<script src="https://horusdesk.com/widget.js" async><\/script>`;
 
   el.innerHTML = `
     <div class="card mb-4">

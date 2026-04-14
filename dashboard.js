@@ -487,8 +487,8 @@ async function renderOrgDetail(main) {
     <div class="loading-overlay"><div class="spinner"></div> Loading...</div>`;
 
   try {
-    const { org, providers, widget, kbDocs } = await api("get_org", { org_id: currentOrgId });
-    window._orgData = { org, providers, widget, kbDocs };
+    const { org, providers, widget, kbDocs, lastPayment } = await api("get_org", { org_id: currentOrgId });
+    window._orgData = { org, providers, widget, kbDocs, lastPayment };
 
     main.innerHTML = `
       <div class="breadcrumb">
@@ -598,8 +598,8 @@ async function renderDemoDetail(main) {
     <div class="loading-overlay"><div class="spinner"></div> Loading...</div>`;
 
   try {
-    const { org, providers, widget, kbDocs } = await api("get_org", { org_id: currentOrgId });
-    window._orgData = { org, providers, widget, kbDocs };
+    const { org, providers, widget, kbDocs, lastPayment } = await api("get_org", { org_id: currentOrgId });
+    window._orgData = { org, providers, widget, kbDocs, lastPayment };
 
     main.innerHTML = `
       <div class="breadcrumb">
@@ -639,8 +639,8 @@ async function resetDemo() {
   try {
     await api("reset_demo", { org_id: currentOrgId });
     toast("Demo reset to defaults", "success");
-    const { org, providers, widget, kbDocs } = await api("get_org", { org_id: currentOrgId });
-    window._orgData = { org, providers, widget, kbDocs };
+    const { org, providers, widget, kbDocs, lastPayment } = await api("get_org", { org_id: currentOrgId });
+    window._orgData = { org, providers, widget, kbDocs, lastPayment };
     currentOrgName = org.name;
     await renderDemoDetail(document.getElementById("main"));
   } catch (e) { toast(e.message, "error"); }
@@ -778,8 +778,8 @@ async function applyTemplate(mode) {
     toast(`Template applied (${mode === "kb" ? "KB documents" : "system prompt"}, widget colors, AI tone)`, "success");
 
     // Refresh org data and re-render current tab
-    const { org, providers, widget, kbDocs } = await api("get_org", { org_id: currentOrgId });
-    window._orgData = { org, providers, widget, kbDocs };
+    const { org, providers, widget, kbDocs, lastPayment } = await api("get_org", { org_id: currentOrgId });
+    window._orgData = { org, providers, widget, kbDocs, lastPayment };
     renderTab();
   } catch (e) {
     document.getElementById("template-error").innerHTML =
@@ -800,10 +800,10 @@ function switchTab(tab) {
 async function renderTab() {
   const el = document.getElementById("tab-content");
   if (!el) return;
-  const { org, providers, widget, kbDocs } = window._orgData;
+  const { org, providers, widget, kbDocs, lastPayment } = window._orgData;
 
   try {
-    if (currentTab === "overview") renderOverviewTab(el, org, providers, widget);
+    if (currentTab === "overview") renderOverviewTab(el, org, providers, widget, lastPayment);
     else if (currentTab === "email") renderEmailTab(el, org, providers);
     else if (currentTab === "widget") renderWidgetTab(el, widget, org);
     else if (currentTab === "kb") renderKbTab(el, kbDocs, org);
@@ -819,7 +819,7 @@ async function renderTab() {
 
 // ── Overview Tab ──────────────────────────────────────────────────────────────
 
-function renderOverviewTab(el, org, providers, widget) {
+function renderOverviewTab(el, org, providers, widget, lastPayment) {
   const pct = org.message_limit_per_month > 0
     ? Math.round((org.messages_used_this_month / org.message_limit_per_month) * 100) : 0;
   const fillClass = pct >= 100 ? "danger" : pct >= 80 ? "warning" : "";
@@ -845,6 +845,26 @@ function renderOverviewTab(el, org, providers, widget) {
         <div class="stat-value stat-value-md">${resetDate}</div>
         <div class="stat-sub">Next billing cycle</div>
       </div>
+      ${!currentIsDemo ? (() => {
+        if (!lastPayment) {
+          return `<div class="stat-card">
+            <div class="stat-label">Last Payment</div>
+            <div class="stat-value stat-value-md">—</div>
+            <div class="stat-sub">No payments yet</div>
+          </div>`;
+        }
+        const paid = new Date(lastPayment.created_at);
+        const paidDateStr = paid.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+        const paidDay = paid.getUTCDate();
+        const billingDay = org.billing_day_of_month || 1;
+        const cmp = paidDay < billingDay ? "before" : paidDay === billingDay ? "on" : "after";
+        const badgeClass = cmp === "after" ? "badge-red" : cmp === "on" ? "badge-yellow" : "badge-green";
+        return `<div class="stat-card">
+          <div class="stat-label">Last Payment</div>
+          <div class="stat-value stat-value-md">${paidDateStr}</div>
+          <div class="stat-sub"><span class="badge ${badgeClass}">${cmp} billing date</span></div>
+        </div>`;
+      })() : ""}
       ${!currentIsDemo ? `<div class="stat-card">
         <div class="stat-label">Email</div>
         <div class="stat-value stat-value-sm" style="word-break:break-all;line-height:1.4">${provider ? (() => { const at = provider.provider_account_email.indexOf("@"); return at === -1 ? escHtml(provider.provider_account_email) : `${escHtml(provider.provider_account_email.slice(0, at))}<br><span style="font-size:12px;opacity:0.8">${escHtml(provider.provider_account_email.slice(at))}</span>`; })() : "—"}</div>
@@ -1444,8 +1464,8 @@ async function submitKbDoc(existingId) {
     document.querySelector(".modal-backdrop").remove();
     toast(`${result.chunks_created} chunks ${existingId ? "updated" : "added"}`, "success");
 
-    const { org, providers, widget, kbDocs } = await api("get_org", { org_id: currentOrgId });
-    window._orgData = { org, providers, widget, kbDocs };
+    const { org, providers, widget, kbDocs, lastPayment } = await api("get_org", { org_id: currentOrgId });
+    window._orgData = { org, providers, widget, kbDocs, lastPayment };
     renderKbTab(document.getElementById("tab-content"), kbDocs, org);
   } catch (e) {
     errEl.innerHTML = `<div class="alert alert-danger">${e.message}</div>`;

@@ -23,7 +23,7 @@
     "url": "https://github.com/right-spc/horus_employee_dashboard/issues"
   },
   "homepage": "https://github.com/right-spc/horus_employee_dashboard#readme",
-  "devDependencies": {
+  "dependencies": {
     "vite": "^8.0.8"
   }
 }

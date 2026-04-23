@@ -2094,6 +2094,54 @@
         <option name="homepage" value="https://www.remocn.dev/" />
         <option name="urlTemplate" value="https://www.remocn.dev/r/{name}.json" />
       </RegistryConfigState>
+      <RegistryConfigState>
+        <option name="id" value="central-loading-ui" />
+        <option name="name" value="Loading-ui" />
+        <option name="namespace" value="@loading-ui" />
+        <option name="baseUrl" value="https://loading-ui.com/r" />
+        <option name="stylePath" value="/{name}.json" />
+        <option name="type" value="community" />
+        <option name="enabled" value="false" />
+        <option name="description" value="Spinners, loaders, and loading animations for modern web apps. Free and open-source." />
+        <option name="homepage" value="https://loading-ui.com" />
+        <option name="urlTemplate" value="https://loading-ui.com/r/{name}.json" />
+      </RegistryConfigState>
+      <RegistryConfigState>
+        <option name="id" value="central-exabase" />
+        <option name="name" value="Exabase" />
+        <option name="namespace" value="@exabase" />
+        <option name="baseUrl" value="https://exawizards.com/exabase/design/registry" />
+        <option name="stylePath" value="/{name}.json" />
+        <option name="type" value="community" />
+        <option name="enabled" value="false" />
+        <option name="description" value="A collection of UI components based on the exaBase Design System, built with React and Tailwind CSS." />
+        <option name="homepage" value="https://exawizards.com/exabase/design/" />
+        <option name="urlTemplate" value="https://exawizards.com/exabase/design/registry/{name}.json" />
+      </RegistryConfigState>
+      <RegistryConfigState>
+        <option name="id" value="central-aicanvas" />
+        <option name="name" value="Aicanvas" />
+        <option name="namespace" value="@aicanvas" />
+        <option name="baseUrl" value="https://aicanvas.me/r" />
+        <option name="stylePath" value="/{name}.json" />
+        <option name="type" value="community" />
+        <option name="enabled" value="false" />
+        <option name="description" value="54 animated React components with AI reproduction prompts for Claude Code, Lovable, and v0. Free and open source." />
+        <option name="homepage" value="https://aicanvas.me" />
+        <option name="urlTemplate" value="https://aicanvas.me/r/{name}.json" />
+      </RegistryConfigState>
+      <RegistryConfigState>
+        <option name="id" value="central-xcn" />
+        <option name="name" value="Xcn" />
+        <option name="namespace" value="@xcn" />
+        <option name="baseUrl" value="https://ui.radiumcoders.com/r/xcn" />
+        <option name="stylePath" value="/{name}.json" />
+        <option name="type" value="community" />
+        <option name="enabled" value="false" />
+        <option name="description" value="Hand-crafted, beautiful, and minimal UI components built with Tailwind CSS and Motion." />
+        <option name="homepage" value="http://ui.radiumcoders.com" />
+        <option name="urlTemplate" value="https://ui.radiumcoders.com/r/xcn/{name}.json" />
+      </RegistryConfigState>
     </registryConfigs>
   </component>
 </project>

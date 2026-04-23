@@ -74,6 +74,7 @@ async function onLogin(user) {
 
     if (isOwner) {
       document.getElementById("sales-nav-item").style.display = "";
+      document.getElementById("team-nav-item").style.display = "";
     }
 
     // Set up nav
@@ -143,6 +144,7 @@ async function render() {
   else if (currentView === "demos") await renderDemoList(main);
   else if (currentView === "demo-detail") await renderDemoDetail(main);
   else if (currentView === "sales") await renderSalesReport(main);
+  else if (currentView === "team") await renderTeamPage(main);
 }
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
@@ -2966,6 +2968,217 @@ function filterTableRows(inputId, tbodyId, emptyMsgId) {
   if (emptyMsgId) {
     const msg = document.getElementById(emptyMsgId);
     if (msg) msg.style.display = visible === 0 && query.length > 0 ? "" : "none";
+  }
+}
+
+// ── Team Management (owner only) ─────────────────────────────────────────────
+
+async function renderTeamPage(main) {
+  main.innerHTML = `
+    <div class="page-header">
+      <h1 class="page-title">Team</h1>
+      <button class="btn btn-primary" onclick="showAddTeamMemberModal()">
+        ${ICONS.plus} Add Member
+      </button>
+    </div>
+    <div class="card">
+      <div class="card-body" id="team-list-container">
+        <div class="loading-overlay"><div class="spinner"></div> Loading...</div>
+      </div>
+    </div>`;
+  await loadTeamList();
+}
+
+async function loadTeamList() {
+  const container = document.getElementById("team-list-container");
+  try {
+    const { team } = await api("list_team");
+    if (!team || team.length === 0) {
+      container.innerHTML = `<p class="text-muted" style="padding:24px;text-align:center">No team members yet.</p>`;
+      return;
+    }
+    container.innerHTML = `
+      <table style="width:100%">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Email</th>
+            <th>Role</th>
+            <th>Status</th>
+            <th style="text-align:right">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${team.map(m => {
+            const isSelf = m.id === dashUser.id;
+            const statusBadge = m.is_active
+              ? `<span style="color:var(--success);font-weight:600">Active</span>`
+              : `<span style="color:var(--danger);font-weight:600">Inactive</span>`;
+            const roleBadge = m.role === "owner"
+              ? `<span style="background:var(--gold);color:var(--bg);padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;text-transform:uppercase">Owner</span>`
+              : `<span style="background:var(--surface-hover);padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;text-transform:uppercase">Salesperson</span>`;
+            return `<tr>
+              <td><strong>${escHtml(m.display_name)}</strong>${isSelf ? ' <span style="color:var(--text-muted);font-size:11px">(you)</span>' : ""}</td>
+              <td style="color:var(--text-muted)">${escHtml(m.email)}</td>
+              <td>${roleBadge}</td>
+              <td>${statusBadge}</td>
+              <td style="text-align:right">
+                <button class="btn btn-ghost btn-sm" onclick='showEditTeamMemberModal(${JSON.stringify(m).replace(/'/g, "&#39;")})'>Edit</button>
+                ${!isSelf ? `<button class="btn btn-ghost btn-sm" style="color:${m.is_active ? "var(--danger)" : "var(--success)"}" onclick='toggleTeamMember("${m.id}", ${!m.is_active})'>${m.is_active ? "Deactivate" : "Reactivate"}</button>
+                <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick='deleteTeamMember("${m.id}", "${escHtml(m.display_name)}")'>Delete</button>` : ""}
+              </td>
+            </tr>`;
+          }).join("")}
+        </tbody>
+      </table>`;
+  } catch (e) {
+    container.innerHTML = `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
+  }
+}
+
+function showAddTeamMemberModal() {
+  const modal = document.createElement("div");
+  modal.className = "modal-backdrop";
+  modal.innerHTML = `
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Add Team Member</h3>
+        <button class="btn btn-ghost btn-sm" onclick="this.closest('.modal-backdrop').remove()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="add-member-error"></div>
+        <div class="form-group">
+          <label>Email</label>
+          <input type="email" id="new-member-email" value="@horusdesk.com" />
+        </div>
+        <div class="form-group">
+          <label>Display Name</label>
+          <input type="text" id="new-member-name" placeholder="First Last" />
+        </div>
+        <div class="form-group">
+          <label>Role</label>
+          <select id="new-member-role">
+            <option value="salesperson" selected>Salesperson</option>
+            <option value="owner">Owner</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="this.closest('.modal-backdrop').remove()">Cancel</button>
+        <button class="btn btn-primary" id="add-member-submit" onclick="submitAddTeamMember()">Add Member</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  const emailInput = document.getElementById("new-member-email");
+  emailInput.setSelectionRange(0, 0);
+  emailInput.focus();
+}
+
+async function submitAddTeamMember() {
+  const email = document.getElementById("new-member-email").value.trim();
+  const displayName = document.getElementById("new-member-name").value.trim();
+  const role = document.getElementById("new-member-role").value;
+  const errEl = document.getElementById("add-member-error");
+  const btn = document.getElementById("add-member-submit");
+
+  errEl.innerHTML = "";
+  if (!email || !displayName) {
+    errEl.innerHTML = `<div class="alert alert-danger">Email and display name are required.</div>`;
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = "Adding...";
+  try {
+    await api("add_team_member", { email, display_name: displayName, role });
+    document.querySelector(".modal-backdrop")?.remove();
+    toast("Team member added", "success");
+    await loadTeamList();
+  } catch (e) {
+    errEl.innerHTML = `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
+    btn.disabled = false;
+    btn.textContent = "Add Member";
+  }
+}
+
+function showEditTeamMemberModal(member) {
+  const modal = document.createElement("div");
+  modal.className = "modal-backdrop";
+  modal.innerHTML = `
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Edit Team Member</h3>
+        <button class="btn btn-ghost btn-sm" onclick="this.closest('.modal-backdrop').remove()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="edit-member-error"></div>
+        <div class="form-group">
+          <label>Display Name</label>
+          <input type="text" id="edit-member-name" value="${escHtml(member.display_name)}" />
+        </div>
+        <div class="form-group">
+          <label>Role</label>
+          <select id="edit-member-role">
+            <option value="salesperson" ${member.role === "salesperson" ? "selected" : ""}>Salesperson</option>
+            <option value="owner" ${member.role === "owner" ? "selected" : ""}>Owner</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="this.closest('.modal-backdrop').remove()">Cancel</button>
+        <button class="btn btn-primary" id="edit-member-submit" onclick="submitEditTeamMember('${member.id}')">Save</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+}
+
+async function submitEditTeamMember(userId) {
+  const displayName = document.getElementById("edit-member-name").value.trim();
+  const role = document.getElementById("edit-member-role").value;
+  const errEl = document.getElementById("edit-member-error");
+  const btn = document.getElementById("edit-member-submit");
+
+  errEl.innerHTML = "";
+  btn.disabled = true;
+  btn.textContent = "Saving...";
+  try {
+    await api("update_team_member", { user_id: userId, updates: { display_name: displayName, role } });
+    document.querySelector(".modal-backdrop")?.remove();
+    toast("Team member updated", "success");
+    if (userId === dashUser.id) {
+      dashUser.display_name = displayName;
+      dashUser.role = role;
+      document.getElementById("user-display").innerHTML =
+        `<strong>${escHtml(displayName)}</strong><br>${role}`;
+    }
+    await loadTeamList();
+  } catch (e) {
+    errEl.innerHTML = `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
+    btn.disabled = false;
+    btn.textContent = "Save";
+  }
+}
+
+async function toggleTeamMember(userId, activate) {
+  const action = activate ? "reactivate" : "deactivate";
+  if (!confirm(`Are you sure you want to ${action} this team member?`)) return;
+  try {
+    await api("update_team_member", { user_id: userId, updates: { is_active: activate } });
+    toast(`Team member ${action}d`, "success");
+    await loadTeamList();
+  } catch (e) {
+    toast(e.message, "error");
+  }
+}
+
+async function deleteTeamMember(userId, name) {
+  if (!confirm(`Permanently delete ${name}? This removes their account entirely and cannot be undone.`)) return;
+  try {
+    await api("delete_team_member", { user_id: userId });
+    toast("Team member deleted", "success");
+    await loadTeamList();
+  } catch (e) {
+    toast(e.message, "error");
   }
 }
 

@@ -8,6 +8,7 @@ let _supabase;
 let currentUser = null;   // Supabase Auth user
 let dashUser = null;      // Dashboard user record (includes role)
 let isOwner = false;
+let isTeamleader = false;
 
 // ── API helper ────────────────────────────────────────────────────────────────
 
@@ -63,6 +64,7 @@ async function onLogin(user) {
     const { user: du } = await api("me");
     dashUser = du;
     isOwner = du.role === "owner";
+    isTeamleader = du.role === "teamleader";
 
     // Show app, hide login
     document.getElementById("login-screen").style.display = "none";
@@ -70,10 +72,10 @@ async function onLogin(user) {
 
     // Update UI for role
     document.getElementById("user-display").innerHTML =
-      `<strong>${escHtml(du.display_name)}</strong><br>${du.role}`;
+      `<strong>${escHtml(du.display_name)}</strong><br>${du.role === "teamleader" ? "team leader" : du.role}`;
 
+    document.getElementById("sales-nav-item").style.display = "";
     if (isOwner) {
-      document.getElementById("sales-nav-item").style.display = "";
       document.getElementById("team-nav-item").style.display = "";
     }
 
@@ -102,6 +104,7 @@ function onLogout() {
   currentUser = null;
   dashUser = null;
   isOwner = false;
+  isTeamleader = false;
   document.getElementById("login-screen").style.display = "";
   document.getElementById("app-screen").style.display = "none";
 }
@@ -489,8 +492,8 @@ async function renderOrgDetail(main) {
     <div class="loading-overlay"><div class="spinner"></div> Loading...</div>`;
 
   try {
-    const { org, providers, widget, kbDocs, lastPayment } = await api("get_org", { org_id: currentOrgId });
-    window._orgData = { org, providers, widget, kbDocs, lastPayment };
+    const { org, providers, widget, kbDocs, lastPayment, integrations } = await api("get_org", { org_id: currentOrgId });
+    window._orgData = { org, providers, widget, kbDocs, lastPayment, integrations };
 
     main.innerHTML = `
       <div class="breadcrumb">
@@ -512,8 +515,9 @@ async function renderOrgDetail(main) {
         <button class="tab" onclick="switchTab('email')">Email Setup</button>
         <button class="tab" onclick="switchTab('widget')">Widget</button>
         <button class="tab" onclick="switchTab('kb')">Knowledge Base</button>
+        <button class="tab" onclick="switchTab('integrations')">Integrations</button>
         <button class="tab" onclick="switchTab('payments')">Payments</button>
-        ${isOwner ? `<button class="tab" onclick="switchTab('reports')">Reports</button>` : ""}
+        <button class="tab" onclick="switchTab('reports')">Reports</button>
         <button class="tab" onclick="switchTab('settings')">Settings</button>
       </div>
       <div id="tab-content"></div>`;
@@ -600,8 +604,8 @@ async function renderDemoDetail(main) {
     <div class="loading-overlay"><div class="spinner"></div> Loading...</div>`;
 
   try {
-    const { org, providers, widget, kbDocs, lastPayment } = await api("get_org", { org_id: currentOrgId });
-    window._orgData = { org, providers, widget, kbDocs, lastPayment };
+    const { org, providers, widget, kbDocs, lastPayment, integrations } = await api("get_org", { org_id: currentOrgId });
+    window._orgData = { org, providers, widget, kbDocs, lastPayment, integrations };
 
     main.innerHTML = `
       <div class="breadcrumb">
@@ -625,7 +629,7 @@ async function renderDemoDetail(main) {
         <button class="tab" onclick="switchTab('widget')">Widget</button>
         <button class="tab" onclick="switchTab('kb')">Knowledge Base</button>
         <button class="tab" onclick="switchTab('notifications')">Notifications</button>
-        ${isOwner ? `<button class="tab" onclick="switchTab('reports')">Reports</button>` : ""}
+        <button class="tab" onclick="switchTab('reports')">Reports</button>
         <button class="tab" onclick="switchTab('settings')">Settings</button>
       </div>
       <div id="tab-content"></div>`;
@@ -641,8 +645,8 @@ async function resetDemo() {
   try {
     await api("reset_demo", { org_id: currentOrgId });
     toast("Demo reset to defaults", "success");
-    const { org, providers, widget, kbDocs, lastPayment } = await api("get_org", { org_id: currentOrgId });
-    window._orgData = { org, providers, widget, kbDocs, lastPayment };
+    const { org, providers, widget, kbDocs, lastPayment, integrations } = await api("get_org", { org_id: currentOrgId });
+    window._orgData = { org, providers, widget, kbDocs, lastPayment, integrations };
     currentOrgName = org.name;
     await renderDemoDetail(document.getElementById("main"));
   } catch (e) { toast(e.message, "error"); }
@@ -780,8 +784,8 @@ async function applyTemplate(mode) {
     toast(`Template applied (${mode === "kb" ? "KB documents" : "system prompt"}, widget colors, AI tone)`, "success");
 
     // Refresh org data and re-render current tab
-    const { org, providers, widget, kbDocs, lastPayment } = await api("get_org", { org_id: currentOrgId });
-    window._orgData = { org, providers, widget, kbDocs, lastPayment };
+    const { org, providers, widget, kbDocs, lastPayment, integrations } = await api("get_org", { org_id: currentOrgId });
+    window._orgData = { org, providers, widget, kbDocs, lastPayment, integrations };
     renderTab();
   } catch (e) {
     document.getElementById("template-error").innerHTML =
@@ -802,13 +806,14 @@ function switchTab(tab) {
 async function renderTab() {
   const el = document.getElementById("tab-content");
   if (!el) return;
-  const { org, providers, widget, kbDocs, lastPayment } = window._orgData;
+  const { org, providers, widget, kbDocs, lastPayment, integrations } = window._orgData;
 
   try {
     if (currentTab === "overview") renderOverviewTab(el, org, providers, widget, lastPayment);
     else if (currentTab === "email") renderEmailTab(el, org, providers);
     else if (currentTab === "widget") renderWidgetTab(el, widget, org);
     else if (currentTab === "kb") renderKbTab(el, kbDocs, org);
+    else if (currentTab === "integrations") renderIntegrationsTab(el, org, integrations);
     else if (currentTab === "notifications") renderNotificationsTab(el, org);
     else if (currentTab === "payments") renderPaymentsTab(el, org);
     else if (currentTab === "reports") renderReportsTab(el, org);
@@ -1030,9 +1035,9 @@ function renderNotificationsTab(el, org) {
     <div class="card mb-4">
       <div class="card-header">
         <div class="card-title">Notification Recipients</div>
-        ${isOwner ? `<button class="btn btn-primary btn-sm" onclick="showAddRecipientModal()">
+        <button class="btn btn-primary btn-sm" onclick="showAddRecipientModal()">
           ${ICONS.plus} Add Recipient
-        </button>` : ""}
+        </button>
       </div>
       <div class="card-body card-body-flush">
         <div id="recipients-list">
@@ -1041,8 +1046,8 @@ function renderNotificationsTab(el, org) {
       </div>
       <div class="card-body text-sm text-muted" style="padding:10px 16px;border-top:1px solid var(--border)">
         ${isOwner
-          ? "Add the people who should receive escalations and alerts for this demo."
-          : "Read-only — only owners can modify notification recipients."}
+          ? "Manage the people who should receive escalations and alerts for this demo."
+          : "Add the people who should receive escalations and alerts for this demo."}
       </div>
     </div>`;
 
@@ -1466,8 +1471,8 @@ async function submitKbDoc(existingId) {
     document.querySelector(".modal-backdrop").remove();
     toast(`${result.chunks_created} chunks ${existingId ? "updated" : "added"}`, "success");
 
-    const { org, providers, widget, kbDocs, lastPayment } = await api("get_org", { org_id: currentOrgId });
-    window._orgData = { org, providers, widget, kbDocs, lastPayment };
+    const { org, providers, widget, kbDocs, lastPayment, integrations } = await api("get_org", { org_id: currentOrgId });
+    window._orgData = { org, providers, widget, kbDocs, lastPayment, integrations };
     renderKbTab(document.getElementById("tab-content"), kbDocs, org);
   } catch (e) {
     errEl.innerHTML = `<div class="alert alert-danger">${e.message}</div>`;
@@ -1485,6 +1490,113 @@ async function deleteKbDoc(docId, title) {
     window._orgData.kbDocs = kbDocs;
     renderKbTab(document.getElementById("tab-content"), kbDocs, window._orgData.org);
   } catch (e) { toast(e.message, "error"); }
+}
+
+// ── Integrations Tab ─────────────────────────────────────────────────────────
+
+function renderIntegrationsTab(el, org, integrations) {
+  const allIntegrations = integrations || [];
+  const calendly = allIntegrations.find(i => i.integration_type === "calendly" && i.status === "active");
+
+  el.innerHTML = `
+    <div class="card mb-4">
+      <div class="card-header"><div class="card-title">Calendly</div></div>
+      <div class="card-body">
+        ${calendly ? `
+          <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px">
+            <div>
+              <div style="font-weight:600">Connected</div>
+              <div class="text-muted" style="margin-top:2px;font-size:13px">
+                <span class="badge badge-green">active</span>
+                &middot; Last updated: ${new Date(calendly.updated_at).toLocaleDateString()}
+              </div>
+              ${calendly.config?.event_types?.length ? `
+              <div class="text-muted" style="margin-top:4px;font-size:13px">
+                Event types: ${calendly.config.event_types.map(et => escHtml(et.name)).join(", ")}
+              </div>` : ""}
+              ${calendly.config?.calendly_user_name ? `
+              <div class="text-muted" style="margin-top:2px;font-size:13px">
+                Account: ${escHtml(calendly.config.calendly_user_name)}
+              </div>` : ""}
+            </div>
+          </div>
+          <p class="text-muted" style="margin-bottom:12px;font-size:13px">
+            The AI receptionist can check real-time availability and create one-time booking links for customers.
+          </p>
+          <button class="btn btn-danger" onclick="disconnectCalendly()">Disconnect Calendly</button>
+        ` : `
+          <p class="text-muted" style="margin-bottom:16px">
+            Connect Calendly to let the AI receptionist check real-time availability and create booking links for customers automatically during conversations.
+          </p>
+          <button class="btn btn-secondary" id="btn-connect-calendly" onclick="connectCalendly()">Connect Calendly</button>
+        `}
+      </div>
+    </div>
+    <div class="card" id="calendly-auth-link-card" style="display:none">
+      <div class="card-header"><div class="card-title">Calendly Authorization Link</div></div>
+      <div class="card-body">
+        <p class="text-muted">Open this link to authorize Calendly access:</p>
+        <div style="background:var(--bg-tertiary);padding:12px;border-radius:6px;word-break:break-all;font-size:13px;font-family:monospace" id="calendly-auth-link-display"></div>
+        <div style="display:flex;gap:8px;margin-top:12px">
+          <button class="btn btn-secondary" onclick="copyCalendlyAuthLink()">Copy Link</button>
+          <button class="btn btn-primary" onclick="openCalendlyAuthLink()">Open Link</button>
+        </div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-header"><div class="card-title">Coming Soon</div></div>
+      <div class="card-body text-muted">
+        More integrations (Google Calendar, Acuity Scheduling) will appear here in future updates.
+      </div>
+    </div>`;
+}
+
+async function connectCalendly() {
+  const btn = document.getElementById("btn-connect-calendly");
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<div class="spinner" style="width:16px;height:16px;display:inline-block"></div> Generating...';
+  }
+  try {
+    const { url } = await api("get_calendly_auth_link", { org_id: currentOrgId });
+    window._calendlyAuthLink = url;
+    document.getElementById("calendly-auth-link-display").textContent = url;
+    document.getElementById("calendly-auth-link-card").style.display = "";
+    toast("Calendly authorization link generated", "success");
+  } catch (e) {
+    toast(`Failed: ${e.message}`, "error");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "Connect Calendly";
+    }
+  }
+}
+
+function copyCalendlyAuthLink() {
+  if (window._calendlyAuthLink) {
+    navigator.clipboard.writeText(window._calendlyAuthLink);
+    toast("Copied to clipboard", "success");
+  }
+}
+
+function openCalendlyAuthLink() {
+  if (window._calendlyAuthLink) {
+    window.open(window._calendlyAuthLink, "_blank");
+  }
+}
+
+async function disconnectCalendly() {
+  if (!confirm("Disconnect Calendly? The AI will fall back to sharing the manual booking link.")) return;
+  try {
+    await api("disconnect_calendly", { org_id: currentOrgId });
+    toast("Calendly disconnected", "success");
+    const data = await api("get_org", { org_id: currentOrgId });
+    window._orgData = { ...window._orgData, ...data };
+    renderTab();
+  } catch (e) {
+    toast(`Failed: ${e.message}`, "error");
+  }
 }
 
 // ── Settings Tab ──────────────────────────────────────────────────────────────
@@ -1542,6 +1654,29 @@ function renderSettingsTab(el, org) {
         </div>
         <div class="form-row">
           <div class="form-group">
+            <label>Timezone</label>
+            <select id="s-timezone">
+              ${[
+                { tz: "UTC",                  label: "UTC" },
+                { tz: "Africa/Cairo",         label: "Africa / Cairo (UTC+2)" },
+                { tz: "America/New_York",     label: "US / Eastern Time (UTC-5)" },
+                { tz: "America/Chicago",      label: "US / Central Time (UTC-6)" },
+                { tz: "America/Denver",       label: "US / Mountain Time (UTC-7)" },
+                { tz: "America/Los_Angeles",  label: "US / Pacific Time (UTC-8)" },
+                { tz: "Europe/London",        label: "Europe / London (UTC+0)" },
+                { tz: "Europe/Paris",         label: "Europe / Paris (UTC+1)" },
+                { tz: "Europe/Berlin",        label: "Europe / Berlin (UTC+1)" },
+                { tz: "Europe/Madrid",        label: "Europe / Madrid (UTC+1)" },
+                { tz: "Europe/Rome",          label: "Europe / Rome (UTC+1)" },
+                { tz: "Europe/Amsterdam",     label: "Europe / Amsterdam (UTC+1)" },
+                { tz: "Europe/Istanbul",      label: "Europe / Istanbul (UTC+3)" },
+                { tz: "Europe/Moscow",        label: "Europe / Moscow (UTC+3)" },
+              ].map(o =>
+                `<option value="${o.tz}" ${(org.business_hours_timezone || "UTC") === o.tz ? "selected" : ""}>${o.label}</option>`
+              ).join("")}
+            </select>
+          </div>
+          <div class="form-group">
             <label>AI Tone</label>
             <select id="s-tone">
               ${["professional","friendly","formal","casual"].map(t =>
@@ -1549,6 +1684,8 @@ function renderSettingsTab(el, org) {
               ).join("")}
             </select>
           </div>
+        </div>
+        <div class="form-row">
           <div class="form-group">
             <label>Subscription Tier</label>
             <select id="s-tier">
@@ -1703,6 +1840,7 @@ async function saveOrgSettings() {
   const updates = {
     name: document.getElementById("s-name").value.trim(),
     slug: document.getElementById("s-slug").value.trim(),
+    business_hours_timezone: document.getElementById("s-timezone").value,
     ai_tone: document.getElementById("s-tone").value,
     subscription_tier: document.getElementById("s-tier").value,
     subscription_plan: document.getElementById("s-plan").value,
@@ -2180,19 +2318,17 @@ function loadPayPalSDK() {
   });
 }
 
-// Preset definitions — owner sees all, salesperson sees only setup + yearly.
-// Each entry: { key, title, price, description, category, ownerOnly }
+// Preset definitions — all roles see all presets, only owner can pay directly via PayPal.
 const PAYMENT_PRESETS = [
-  { key: "setup",   title: "Setup Fee", price: 199,  description: "Setup Fee",            category: "setup",   ownerOnly: false, hint: "One-time setup" },
-  { key: "monthly", title: "Monthly",   price: 299,  description: "Monthly Plan",         category: "monthly", ownerOnly: true,  hint: "Per billing cycle" },
-  { key: "yearly",  title: "Yearly",    price: 3588, description: "Yearly Plan",          category: "yearly",  ownerOnly: false, hint: "14 months of service (2 months free)" },
-  { key: "addon",   title: "Addon",     price: 59,   description: "Message credit addon", category: "addon",   ownerOnly: true,  hint: "+1,000 message credits" },
+  { key: "setup",   title: "Setup Fee", price: 199,  description: "Setup Fee",            category: "setup",   hint: "One-time setup" },
+  { key: "monthly", title: "Monthly",   price: 299,  description: "Monthly Plan",         category: "monthly", hint: "Per billing cycle" },
+  { key: "yearly",  title: "Yearly",    price: 3588, description: "Yearly Plan",          category: "yearly",  hint: "14 months of service (2 months free)" },
+  { key: "addon",   title: "Addon",     price: 59,   description: "Message credit addon", category: "addon",   hint: "+1,000 message credits" },
 ];
 
 function renderPaymentsTab(el, org) {
-  const presets = PAYMENT_PRESETS.filter(p => isOwner || !p.ownerOnly);
+  const presets = PAYMENT_PRESETS;
 
-  // Salesperson sees only Send Link buttons; owner sees Pay + Send Link.
   const presetsHtml = presets.map(p => `
     <div class="payment-option">
       <div class="payment-option-title">${escHtml(p.title)}</div>
@@ -2208,13 +2344,12 @@ function renderPaymentsTab(el, org) {
 
   el.innerHTML = `
     <div class="card mb-4">
-      <div class="card-header"><div class="card-title">${isOwner ? "Quick Select" : "Payment Options"}</div></div>
+      <div class="card-header"><div class="card-title">Payment Options</div></div>
       <div class="card-body">
         <div class="payment-options-grid">${presetsHtml}</div>
       </div>
     </div>
 
-    ${isOwner ? `
     <div class="card mb-4">
       <div class="card-header"><div class="card-title">Custom Amount</div></div>
       <div class="card-body">
@@ -2229,12 +2364,12 @@ function renderPaymentsTab(el, org) {
           </div>
         </div>
         <div class="flex-row">
-          <button class="btn btn-primary" onclick="selectCustomPayment('pay')">Pay with PayPal</button>
+          ${isOwner ? `<button class="btn btn-primary" onclick="selectCustomPayment('pay')">Pay with PayPal</button>` : ""}
           <button class="btn btn-secondary" onclick="selectCustomPayment('link')">Send link instead</button>
           <button class="btn btn-secondary" onclick="selectCustomPayment('dashboard')">Send to dashboard</button>
         </div>
       </div>
-    </div>` : ""}
+    </div>
 
     <div id="paypal-container" style="display:none">
       <div class="card mb-4">
@@ -2625,7 +2760,7 @@ async function editPaymentEntry(paymentId) {
   };
 }
 
-// ── Sales Report (owners only) ────────────────────────────────────────────────
+// ── Sales Report ──────────────────────────────────────────────────────────────
 
 async function renderSalesReport(main) {
   main.innerHTML = `
@@ -2714,7 +2849,7 @@ async function loadRecipients() {
       return;
     }
 
-    const showActions = !(currentIsDemo && !isOwner);
+    const showActions = isOwner;
 
     const rows = recipients.map(r => {
       const tags = (r.notify_on || []).map(t =>
@@ -3016,6 +3151,8 @@ async function loadTeamList() {
               : `<span style="color:var(--danger);font-weight:600">Inactive</span>`;
             const roleBadge = m.role === "owner"
               ? `<span style="background:var(--gold);color:var(--bg);padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;text-transform:uppercase">Owner</span>`
+              : m.role === "teamleader"
+              ? `<span style="background:var(--primary);color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;text-transform:uppercase">Team Leader</span>`
               : `<span style="background:var(--surface-hover);padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;text-transform:uppercase">Salesperson</span>`;
             return `<tr>
               <td><strong>${escHtml(m.display_name)}</strong>${isSelf ? ' <span style="color:var(--text-muted);font-size:11px">(you)</span>' : ""}</td>
@@ -3059,6 +3196,7 @@ function showAddTeamMemberModal() {
           <label>Role</label>
           <select id="new-member-role">
             <option value="salesperson" selected>Salesperson</option>
+            <option value="teamleader">Team Leader</option>
             <option value="owner">Owner</option>
           </select>
         </div>
@@ -3120,6 +3258,7 @@ function showEditTeamMemberModal(member) {
           <label>Role</label>
           <select id="edit-member-role">
             <option value="salesperson" ${member.role === "salesperson" ? "selected" : ""}>Salesperson</option>
+            <option value="teamleader" ${member.role === "teamleader" ? "selected" : ""}>Team Leader</option>
             <option value="owner" ${member.role === "owner" ? "selected" : ""}>Owner</option>
           </select>
         </div>
@@ -3148,8 +3287,10 @@ async function submitEditTeamMember(userId) {
     if (userId === dashUser.id) {
       dashUser.display_name = displayName;
       dashUser.role = role;
+      isOwner = role === "owner";
+      isTeamleader = role === "teamleader";
       document.getElementById("user-display").innerHTML =
-        `<strong>${escHtml(displayName)}</strong><br>${role}`;
+        `<strong>${escHtml(displayName)}</strong><br>${role === "teamleader" ? "team leader" : role}`;
     }
     await loadTeamList();
   } catch (e) {

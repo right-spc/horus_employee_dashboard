@@ -813,7 +813,7 @@ async function renderTab() {
     else if (currentTab === "email") renderEmailTab(el, org, providers);
     else if (currentTab === "widget") renderWidgetTab(el, widget, org);
     else if (currentTab === "kb") renderKbTab(el, kbDocs, org);
-    else if (currentTab === "integrations") renderIntegrationsTab(el, org, integrations);
+    else if (currentTab === "integrations") renderIntegrationsTab(el, org, integrations, providers);
     else if (currentTab === "notifications") renderNotificationsTab(el, org);
     else if (currentTab === "payments") renderPaymentsTab(el, org);
     else if (currentTab === "reports") renderReportsTab(el, org);
@@ -1494,9 +1494,11 @@ async function deleteKbDoc(docId, title) {
 
 // ── Integrations Tab ─────────────────────────────────────────────────────────
 
-function renderIntegrationsTab(el, org, integrations) {
+function renderIntegrationsTab(el, org, integrations, providers) {
   const allIntegrations = integrations || [];
   const calendly = allIntegrations.find(i => i.integration_type === "calendly" && i.status === "active");
+  const googleProvider = (providers || []).find(p => p.provider === "google" && p.status === "active");
+  const hasCalendarScope = googleProvider?.granted_scopes?.some(s => s.includes("calendar")) ?? false;
 
   el.innerHTML = `
     <div class="card mb-4">
@@ -1521,7 +1523,7 @@ function renderIntegrationsTab(el, org, integrations) {
             </div>
           </div>
           <p class="text-muted" style="margin-bottom:12px;font-size:13px">
-            The AI receptionist can check real-time availability and create one-time booking links for customers.
+            The AI receptionist uses Calendly to check real-time availability.${hasCalendarScope ? " Bookings are made directly on Google Calendar." : ""}
           </p>
           <button class="btn btn-danger" onclick="disconnectCalendly()">Disconnect Calendly</button>
         ` : `
@@ -1544,9 +1546,26 @@ function renderIntegrationsTab(el, org, integrations) {
       </div>
     </div>
     <div class="card" style="margin-top:16px">
-      <div class="card-header"><div class="card-title">Coming Soon</div></div>
-      <div class="card-body text-muted">
-        More integrations (Google Calendar, Acuity Scheduling) will appear here in future updates.
+      <div class="card-header"><div class="card-title">Google Calendar Booking</div></div>
+      <div class="card-body">
+        ${hasCalendarScope ? `
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+            <span class="badge badge-green">Active</span>
+            <span class="text-muted" style="font-size:13px">${escHtml(googleProvider.provider_account_email)}</span>
+          </div>
+          <p class="text-muted" style="font-size:13px">
+            The AI receptionist can book appointments directly on your Google Calendar and send customers a calendar invite — no external links needed.
+          </p>
+        ` : googleProvider ? `
+          <p class="text-muted" style="margin-bottom:12px;font-size:13px">
+            Your Google account is connected for email but calendar booking is not authorized. Re-connect Google in the <strong>Email Setup</strong> tab to enable in-chat booking.
+          </p>
+          <span class="badge badge-yellow">Requires re-authorization</span>
+        ` : `
+          <p class="text-muted" style="font-size:13px">
+            Connect a Google account in the <strong>Email Setup</strong> tab to enable direct calendar booking from conversations.
+          </p>
+        `}
       </div>
     </div>`;
 }
@@ -3150,7 +3169,7 @@ async function loadTeamList() {
               ? `<span style="color:var(--success);font-weight:600">Active</span>`
               : `<span style="color:var(--danger);font-weight:600">Inactive</span>`;
             const roleBadge = m.role === "owner"
-              ? `<span style="background:var(--gold);color:var(--bg);padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;text-transform:uppercase">Owner</span>`
+              ? `<span style="background:var(--gold);color:var(--bg);padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;text-transform:uppercase">Admin</span>`
               : m.role === "teamleader"
               ? `<span style="background:var(--primary);color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;text-transform:uppercase">Team Leader</span>`
               : `<span style="background:var(--surface-hover);padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;text-transform:uppercase">Salesperson</span>`;
@@ -3197,7 +3216,7 @@ function showAddTeamMemberModal() {
           <select id="new-member-role">
             <option value="salesperson" selected>Salesperson</option>
             <option value="teamleader">Team Leader</option>
-            <option value="owner">Owner</option>
+            <option value="owner">Admin</option>
           </select>
         </div>
       </div>
@@ -3259,7 +3278,7 @@ function showEditTeamMemberModal(member) {
           <select id="edit-member-role">
             <option value="salesperson" ${member.role === "salesperson" ? "selected" : ""}>Salesperson</option>
             <option value="teamleader" ${member.role === "teamleader" ? "selected" : ""}>Team Leader</option>
-            <option value="owner" ${member.role === "owner" ? "selected" : ""}>Owner</option>
+            <option value="owner" ${member.role === "owner" ? "selected" : ""}>Admin</option>
           </select>
         </div>
       </div>

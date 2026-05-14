@@ -10,6 +10,17 @@ let dashUser = null;      // Dashboard user record (includes role)
 let isOwner = false;
 let isTeamleader = false;
 
+const DEFAULT_ROUTING_RULES_TEXT = `Classify every response using the submit_response tool:
+- DRAFT — Normal inquiry you can answer. Set confidence 0.00–1.00 based on how sure you are.
+- IGNORE — Spam, test messages, gibberish, not a real inquiry.
+- ESCALATE_FRUSTRATED — Customer is upset, angry, or making threats.
+- ESCALATE_KB_GAP — Question is outside your knowledge base.
+- ESCALATE_LEAD_HIGH — Customer is ready to buy or book.
+- ESCALATE_LEAD_MID — Customer is actively interested.
+- ESCALATE_LEAD_LOW — Customer is just browsing.
+
+Always use the submit_response tool to deliver your response — never output raw text without calling it.`;
+
 // ── API helper ────────────────────────────────────────────────────────────────
 
 async function api(action, params = {}) {
@@ -1808,6 +1819,23 @@ function renderSettingsTab(el, org) {
     </div>
 
     ${isOwner ? `
+    <div class="card mb-4">
+      <div class="card-header"><div class="card-title">Routing Rules</div></div>
+      <div class="card-body">
+        <p class="text-muted" style="font-size:13px;margin-bottom:12px">
+          Customize when the AI uses each routing code. These rules tell the AI
+          how to classify responses (draft, ignore, escalate, lead detection).
+        </p>
+        <div class="form-group">
+          <textarea id="s-routing-rules" rows="14">${escHtml(org.routing_rules || DEFAULT_ROUTING_RULES_TEXT)}</textarea>
+        </div>
+        <div class="flex-row">
+          <button class="btn btn-primary" onclick="saveRoutingRules()">Save Routing Rules</button>
+          <button class="btn btn-secondary" onclick="resetRoutingRules()">Reset to Defaults</button>
+        </div>
+      </div>
+    </div>
+
     <div class="card" style="border-color:rgba(239,68,68,0.3)">
       <div class="card-header" style="border-color:rgba(239,68,68,0.3)">
         <div class="card-title" style="color:var(--danger)">Reset Usage</div>
@@ -1911,6 +1939,23 @@ async function saveSystemPrompt() {
     window._orgData.org.ai_system_prompt_version = currentVersion + 1;
     document.querySelector(".form-hint") && (document.querySelector(".form-hint").textContent = `Version: ${currentVersion + 1}`);
   } catch (e) { toast(e.message, "error"); }
+}
+
+async function saveRoutingRules() {
+  const rules = document.getElementById("s-routing-rules").value.trim();
+  try {
+    await api("update_org", {
+      org_id: currentOrgId,
+      updates: { routing_rules: rules || null },
+    });
+    window._orgData.org.routing_rules = rules || null;
+    toast("Routing rules saved", "success");
+  } catch (e) { toast(e.message, "error"); }
+}
+
+function resetRoutingRules() {
+  if (!confirm("Reset routing rules to defaults?")) return;
+  document.getElementById("s-routing-rules").value = DEFAULT_ROUTING_RULES_TEXT;
 }
 
 async function resetUsage() {

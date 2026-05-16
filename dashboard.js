@@ -1558,27 +1558,83 @@ function renderIntegrationsTab(el, org, integrations, providers) {
     </div>
     <div class="card" style="margin-top:16px">
       <div class="card-header"><div class="card-title">Google Calendar Booking</div></div>
+      <div class="card-body" id="gcal-card-body">
+        ${(() => {
+          const gcalIntegration = allIntegrations.find(i => i.integration_type === "google_calendar" && i.status === "active");
+          if (gcalIntegration) {
+            const acctEmail = gcalIntegration.config?.account_email || "connected account";
+            return `
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+                <span class="badge badge-green">Active</span>
+                <span class="text-muted" style="font-size:13px">${escHtml(acctEmail)} (separate account)</span>
+              </div>
+              <p class="text-muted" style="font-size:13px;margin-bottom:12px">
+                The AI receptionist books appointments on this Google Calendar and sends customers a calendar invite.
+              </p>
+              <div style="margin-bottom:12px">
+                <label style="font-size:13px;font-weight:600;display:block;margin-bottom:4px">Calendar</label>
+                <select id="gcal-calendar-select" onchange="saveGoogleCalendarSelection()" style="width:100%;max-width:320px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary);font-size:13px">
+                  <option value="">Primary Calendar</option>
+                </select>
+                <div id="gcal-calendar-loading" class="text-muted" style="font-size:12px;margin-top:4px">Loading calendars...</div>
+              </div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <button class="btn btn-danger" onclick="disconnectGoogleCalendar()">Disconnect</button>
+                ${hasCalendarScope ? '<button class="btn btn-secondary" onclick="disconnectGoogleCalendar()" title="Remove separate account and use Gmail calendar instead">Switch to Gmail Calendar</button>' : ''}
+              </div>`;
+          }
+          if (hasCalendarScope) {
+            return `
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+                <span class="badge badge-green">Active</span>
+                <span class="text-muted" style="font-size:13px">${escHtml(googleProvider.provider_account_email)} (Gmail)</span>
+              </div>
+              <p class="text-muted" style="font-size:13px;margin-bottom:12px">
+                The AI receptionist books appointments on your Google Calendar and sends customers a calendar invite.
+              </p>
+              <div style="margin-bottom:12px">
+                <label style="font-size:13px;font-weight:600;display:block;margin-bottom:4px">Calendar</label>
+                <select id="gcal-calendar-select" onchange="saveGoogleCalendarSelection()" style="width:100%;max-width:320px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-secondary);color:var(--text-primary);font-size:13px">
+                  <option value="">Primary Calendar</option>
+                </select>
+                <div id="gcal-calendar-loading" class="text-muted" style="font-size:12px;margin-top:4px">Loading calendars...</div>
+              </div>
+              <button class="btn btn-secondary" id="btn-connect-gcal" onclick="connectGoogleCalendar()">Connect Different Google Account for Calendar</button>`;
+          }
+          if (googleProvider) {
+            return `
+              <p class="text-muted" style="margin-bottom:12px;font-size:13px">
+                Your Google account is connected for email but calendar booking is not authorized. Re-connect Google in the <strong>Email Setup</strong> tab to enable in-chat booking.
+              </p>
+              <span class="badge badge-yellow">Requires re-authorization</span>
+              <div style="margin-top:12px">
+                <button class="btn btn-secondary" id="btn-connect-gcal" onclick="connectGoogleCalendar()">Or Connect Different Google Account for Calendar</button>
+              </div>`;
+          }
+          return `
+            <p class="text-muted" style="font-size:13px;margin-bottom:12px">
+              ${(providers || []).some(p => p.provider === "microsoft") ? "Your email is connected via Microsoft. To enable Google Calendar booking, connect a Google account below." : "Connect a Google account in the <strong>Email Setup</strong> tab to enable direct calendar booking from conversations."}
+            </p>
+            <button class="btn btn-secondary" id="btn-connect-gcal" onclick="connectGoogleCalendar()">Connect Google Calendar</button>`;
+        })()}
+      </div>
+    </div>
+    <div class="card" id="gcal-auth-link-card" style="display:none;margin-top:16px">
+      <div class="card-header"><div class="card-title">Google Calendar Authorization Link</div></div>
       <div class="card-body">
-        ${hasCalendarScope ? `
-          <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
-            <span class="badge badge-green">Active</span>
-            <span class="text-muted" style="font-size:13px">${escHtml(googleProvider.provider_account_email)}</span>
-          </div>
-          <p class="text-muted" style="font-size:13px">
-            The AI receptionist can book appointments directly on your Google Calendar and send customers a calendar invite — no external links needed.
-          </p>
-        ` : googleProvider ? `
-          <p class="text-muted" style="margin-bottom:12px;font-size:13px">
-            Your Google account is connected for email but calendar booking is not authorized. Re-connect Google in the <strong>Email Setup</strong> tab to enable in-chat booking.
-          </p>
-          <span class="badge badge-yellow">Requires re-authorization</span>
-        ` : `
-          <p class="text-muted" style="font-size:13px">
-            Connect a Google account in the <strong>Email Setup</strong> tab to enable direct calendar booking from conversations.
-          </p>
-        `}
+        <p class="text-muted">Open this link to authorize Google Calendar access:</p>
+        <div style="background:var(--bg-tertiary);padding:12px;border-radius:6px;word-break:break-all;font-size:13px;font-family:monospace" id="gcal-auth-link-display"></div>
+        <div style="display:flex;gap:8px;margin-top:12px">
+          <button class="btn btn-secondary" onclick="copyGcalAuthLink()">Copy Link</button>
+          <button class="btn btn-primary" onclick="openGcalAuthLink()">Open Link</button>
+        </div>
       </div>
     </div>`;
+
+  // Load calendar dropdown if the card has a select element
+  if (document.getElementById("gcal-calendar-select")) {
+    loadGoogleCalendars();
+  }
 }
 
 async function connectCalendly() {
@@ -1613,6 +1669,106 @@ function copyCalendlyAuthLink() {
 function openCalendlyAuthLink() {
   if (window._calendlyAuthLink) {
     window.open(window._calendlyAuthLink, "_blank");
+  }
+}
+
+async function loadGoogleCalendars() {
+  const select = document.getElementById("gcal-calendar-select");
+  const loading = document.getElementById("gcal-calendar-loading");
+  if (!select) return;
+
+  try {
+    const calResult = await api("list_google_calendars", { org_id: currentOrgId });
+    const calendars = calResult.calendars || [];
+
+    // Get current selection from integration or gmail provider
+    const { google_calendar: gcalIntegration, gmail_calendar } = await api("get_google_calendar_status", { org_id: currentOrgId });
+    let selectedId = "";
+    if (gcalIntegration?.config?.selected_calendar_id) {
+      selectedId = gcalIntegration.config.selected_calendar_id;
+    } else if (gmail_calendar?.selected_calendar_id) {
+      selectedId = gmail_calendar.selected_calendar_id;
+    }
+
+    select.innerHTML = '<option value="">Primary Calendar</option>';
+    if (calResult.scope_missing) {
+      if (loading) loading.textContent = "Calendar list unavailable — re-connect Google or connect a separate account to enable selection.";
+      return;
+    }
+    (calendars || []).forEach(cal => {
+      const opt = document.createElement("option");
+      opt.value = cal.id;
+      opt.textContent = cal.summary + (cal.primary ? " (Primary)" : "");
+      if (cal.id === selectedId) opt.selected = true;
+      select.appendChild(opt);
+    });
+
+    if (loading) loading.style.display = "none";
+  } catch (e) {
+    if (loading) loading.textContent = "Could not load calendars";
+    console.error("loadGoogleCalendars error:", e);
+  }
+}
+
+async function saveGoogleCalendarSelection() {
+  const select = document.getElementById("gcal-calendar-select");
+  if (!select) return;
+  try {
+    await api("update_google_calendar_selection", {
+      org_id: currentOrgId,
+      calendar_id: select.value || null,
+    });
+    toast("Calendar selection saved", "success");
+  } catch (e) {
+    toast(`Failed: ${e.message}`, "error");
+  }
+}
+
+async function connectGoogleCalendar() {
+  const btn = document.getElementById("btn-connect-gcal");
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<div class="spinner" style="width:16px;height:16px;display:inline-block"></div> Generating...';
+  }
+  try {
+    const { url } = await api("get_google_calendar_auth_link", { org_id: currentOrgId });
+    window._gcalAuthLink = url;
+    document.getElementById("gcal-auth-link-display").textContent = url;
+    document.getElementById("gcal-auth-link-card").style.display = "";
+    toast("Google Calendar authorization link generated", "success");
+  } catch (e) {
+    toast(`Failed: ${e.message}`, "error");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "Connect Google Calendar";
+    }
+  }
+}
+
+async function disconnectGoogleCalendar() {
+  if (!confirm("Disconnect Google Calendar integration? Bookings will fall back to the Gmail calendar if available.")) return;
+  try {
+    await api("disconnect_google_calendar", { org_id: currentOrgId });
+    toast("Google Calendar disconnected", "success");
+    const data = await api("get_org", { org_id: currentOrgId });
+    window._orgData = { ...window._orgData, ...data };
+    renderTab();
+  } catch (e) {
+    toast(`Failed: ${e.message}`, "error");
+  }
+}
+
+function copyGcalAuthLink() {
+  if (window._gcalAuthLink) {
+    navigator.clipboard.writeText(window._gcalAuthLink);
+    toast("Copied to clipboard", "success");
+  }
+}
+
+function openGcalAuthLink() {
+  if (window._gcalAuthLink) {
+    window.open(window._gcalAuthLink, "_blank");
   }
 }
 

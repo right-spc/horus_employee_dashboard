@@ -133,3 +133,7 @@ COMMIT;
 -- 3. All 16 table-touching edge functions schema-qualified (.schema('x').from('y')) and redeployed
 -- 4. Compat views dropped: DROP VIEW public.<all 31>; public schema now empty (0 tables, 0 views)
 -- NOTE: messaging.contacts bridge view is PERMANENT infrastructure (not a compat view) — do not drop.
+
+-- 5. Additional permanent bridge views (cross-schema FK embeds from core.organizations used by widget-chat + handle-inbound-email):
+--    CREATE VIEW core.business_profiles / core.business_hours / core.business_services WITH (security_invoker=true) AS SELECT * FROM business.<same>;
+--    (Same pattern as messaging.contacts. PostgREST only discovers relationships within the request schema.)

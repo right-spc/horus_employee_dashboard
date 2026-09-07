@@ -52,7 +52,7 @@ Deno.serve(async (req: Request) => {
 
   // ── Validate API key ──────────────────────
   const { data: widgetConfig, error: configError } = await supabase
-    .from("widget_configs")
+    .schema("core").from("widget_configs")
     .select("organization_id, allowed_domains")
     .eq("api_key", apiKey)
     .single();
@@ -68,7 +68,7 @@ Deno.serve(async (req: Request) => {
   // ── Look up conversation by sessionId ─────
   // sessionId is stored as external_thread_id on webchat conversations
   const { data: conversation } = await supabase
-    .from("conversations")
+    .schema("messaging").from("conversations")
     .select("id")
     .eq("organization_id", organizationId)
     .eq("channel", "webchat")
@@ -77,7 +77,7 @@ Deno.serve(async (req: Request) => {
 
   // ── Save survey ───────────────────────────
   const { error: surveyError } = await supabase
-    .from("widget_surveys")
+    .schema("messaging").from("widget_surveys")
     .insert({
       organization_id: organizationId,
       conversation_id: conversation?.id ?? null,

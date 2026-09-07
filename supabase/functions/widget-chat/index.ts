@@ -95,7 +95,7 @@ Deno.serve(async (req: Request) => {
 
   // ── 1. VALIDATE API KEY ───────────────────
   const { data: widgetConfig, error: configError } = await supabase
-    .from("widget_configs")
+    .schema("core").from("widget_configs")
     .select("organization_id, enabled, welcome_message, colors, allowed_domains, rate_limit_per_hour, rate_limit_per_ip_per_minute")
     .eq("api_key", apiKey)
     .single();
@@ -156,7 +156,7 @@ Deno.serve(async (req: Request) => {
 
   if (isOverLimit) {
     await supabase
-      .from("widget_configs")
+      .schema("core").from("widget_configs")
       .update({ enabled: false, disable_reason: "usage_limit" })
       .eq("organization_id", organizationId);
     return errorResponse(
@@ -169,7 +169,7 @@ Deno.serve(async (req: Request) => {
   try {
     // ── 3. LOAD ORGANIZATION CONFIG ───────────
     const { data: org, error: orgError } = await supabase
-      .from("organizations")
+      .schema("core").from("organizations")
       .select(`
         id,
         ai_tone,
@@ -239,7 +239,7 @@ Deno.serve(async (req: Request) => {
     if (visitorEmail) {
       // Look up by email alias
       const { data: alias } = await supabase
-        .from("contact_aliases")
+        .schema("crm").from("contact_aliases")
         .select("contact_id")
         .eq("organization_id", organizationId)
         .eq("alias_type", "email")
@@ -249,13 +249,13 @@ Deno.serve(async (req: Request) => {
       if (alias) {
         contactId = alias.contact_id;
         await supabase
-          .from("contacts")
+          .schema("crm").from("contacts")
           .update({ last_seen_at: new Date().toISOString() })
           .eq("id", contactId);
       } else {
         // Create new contact
         const { data: newContact, error: contactError } = await supabase
-          .from("contacts")
+          .schema("crm").from("contacts")
           .insert({
             organization_id: organizationId,
             primary_email: visitorEmail,
@@ -270,7 +270,7 @@ Deno.serve(async (req: Request) => {
 
         contactId = newContact.id;
 
-        await supabase.from("contact_aliases").insert({
+        await supabase.schema("crm").from("contact_aliases").insert({
           contact_id: contactId,
           organization_id: organizationId,
           alias_type: "email",
@@ -282,7 +282,7 @@ Deno.serve(async (req: Request) => {
       // No email — use sessionId as a custom alias to maintain identity
       // across messages within the same widget session
       const { data: alias } = await supabase
-        .from("contact_aliases")
+        .schema("crm").from("contact_aliases")
         .select("contact_id")
         .eq("organization_id", organizationId)
         .eq("alias_type", "custom")
@@ -292,12 +292,12 @@ Deno.serve(async (req: Request) => {
       if (alias) {
         contactId = alias.contact_id;
         await supabase
-          .from("contacts")
+          .schema("crm").from("contacts")
           .update({ last_seen_at: new Date().toISOString() })
           .eq("id", contactId);
       } else {
         const { data: newContact, error: contactError } = await supabase
-          .from("contacts")
+          .schema("crm").from("contacts")
           .insert({
             organization_id: organizationId,
             primary_email: `widget-${sessionId}@anonymous.horusdesk.internal`,
@@ -312,7 +312,7 @@ Deno.serve(async (req: Request) => {
 
         contactId = newContact.id;
 
-        await supabase.from("contact_aliases").insert({
+        await supabase.schema("crm").from("contact_aliases").insert({
           contact_id: contactId,
           organization_id: organizationId,
           alias_type: "custom",
@@ -325,7 +325,7 @@ Deno.serve(async (req: Request) => {
     // ── 5. CONVERSATION RESOLUTION ────────────
     // sessionId is the thread identifier for webchat
     const { data: conversation, error: convError } = await supabase
-      .from("conversations")
+      .schema("messaging").from("conversations")
       .upsert(
         {
           organization_id: organizationId,
@@ -363,7 +363,7 @@ Deno.serve(async (req: Request) => {
 
     // ── 6. SAVE INBOUND MESSAGE ───────────────
     const { data: inboundMessage, error: msgError } = await supabase
-      .from("messages")
+      .schema("messaging").from("messages")
       .insert({
         conversation_id: conversation.id,
         organization_id: organizationId,
@@ -380,7 +380,7 @@ Deno.serve(async (req: Request) => {
     }
 
     // ── 7. LOG ANALYTICS EVENT ────────────────
-    await supabase.from("analytics_events").insert({
+    await supabase.schema("analytics").from("analytics_events").insert({
       organization_id: organizationId,
       event_type: "message_received",
       metadata: {
@@ -398,7 +398,7 @@ Deno.serve(async (req: Request) => {
 
     // 8a. Conversation history — count total then decide: full window or summary + recent
     const { count: totalMsgCount } = await supabase
-      .from("messages")
+      .schema("messaging").from("messages")
       .select("*", { count: "exact", head: true })
       .eq("conversation_id", conversation.id)
       .in("status", ["sent", "auto_sent", "pending_review"])
@@ -415,7 +415,7 @@ Deno.serve(async (req: Request) => {
       );
 
       const { data: recentMessages } = await supabase
-        .from("messages")
+        .schema("messaging").from("messages")
         .select("role, content, created_at")
         .eq("conversation_id", conversation.id)
         .in("status", ["sent", "auto_sent", "pending_review"])
@@ -426,7 +426,7 @@ Deno.serve(async (req: Request) => {
       history = (recentMessages ?? []).reverse();
     } else {
       const { data: historyMessages } = await supabase
-        .from("messages")
+        .schema("messaging").from("messages")
         .select("role, content, created_at")
         .eq("conversation_id", conversation.id)
         .in("status", ["sent", "auto_sent", "pending_review"])
@@ -629,7 +629,7 @@ Deno.serve(async (req: Request) => {
 
     // Save AI message
     const { data: aiMessage, error: aiMsgError } = await supabase
-      .from("messages")
+      .schema("messaging").from("messages")
       .insert({
         conversation_id: conversation.id,
         organization_id: organizationId,
@@ -661,7 +661,7 @@ Deno.serve(async (req: Request) => {
       const notifyAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
       await supabase
-        .from("conversations")
+        .schema("messaging").from("conversations")
         .update({
           status: "escalated",
           escalation_reason: "AI determined human intervention required",
@@ -671,7 +671,7 @@ Deno.serve(async (req: Request) => {
         })
         .eq("id", conversation.id);
 
-      await supabase.from("analytics_events").insert({
+      await supabase.schema("analytics").from("analytics_events").insert({
         organization_id: organizationId,
         event_type: "escalated",
         metadata: {
@@ -684,7 +684,7 @@ Deno.serve(async (req: Request) => {
     } else if (effectiveCode === "ESCALATE" && isEscalated) {
       // Already escalated — update the type/priority but don't move the timer
       await supabase
-        .from("conversations")
+        .schema("messaging").from("conversations")
         .update({
           escalation_type: parsed.escalation_type,
           lead_priority: parsed.lead_priority,
@@ -694,18 +694,18 @@ Deno.serve(async (req: Request) => {
 
     // Update conversation timestamps
     await supabase
-      .from("conversations")
+      .schema("messaging").from("conversations")
       .update({ last_ai_response_at: new Date().toISOString() })
       .eq("id", conversation.id);
 
     if (parsed.subject) {
       await supabase
-        .from("conversations")
+        .schema("messaging").from("conversations")
         .update({ subject: parsed.subject })
         .eq("id", conversation.id);
     }
 
-    await supabase.from("analytics_events").insert({
+    await supabase.schema("analytics").from("analytics_events").insert({
       organization_id: organizationId,
       event_type: "ai_generated",
       metadata: {
@@ -787,7 +787,7 @@ async function handleHistoryRequest(req: Request): Promise<Response> {
   );
 
   const { data: widgetConfig, error: configError } = await supabase
-    .from("widget_configs")
+    .schema("core").from("widget_configs")
     .select("organization_id, allowed_domains")
     .eq("api_key", apiKey)
     .single();
@@ -800,7 +800,7 @@ async function handleHistoryRequest(req: Request): Promise<Response> {
   const allowedOrigin = getAllowedOrigin(origin, widgetConfig.allowed_domains);
 
   const { data: conversation } = await supabase
-    .from("conversations")
+    .schema("messaging").from("conversations")
     .select("id")
     .eq("organization_id", widgetConfig.organization_id)
     .eq("channel", "webchat")
@@ -812,7 +812,7 @@ async function handleHistoryRequest(req: Request): Promise<Response> {
   }
 
   const { data: messages, error: msgError } = await supabase
-    .from("messages")
+    .schema("messaging").from("messages")
     .select("role, content, created_at")
     .eq("conversation_id", conversation.id)
     .in("status", ["sent", "auto_sent", "pending_review"])
@@ -877,7 +877,7 @@ async function selectKbChunks(
   try {
     // 1. Load all chunks for the org
     const { data: allChunks } = await supabase
-      .from("kb_chunks")
+      .schema("kb").from("kb_chunks")
       .select("chunk_code, content")
       .eq("organization_id", organizationId)
       .order("chunk_index", { ascending: true });
@@ -942,7 +942,7 @@ async function fallbackSearch(
 ): Promise<Array<{ content: string }>> {
   const keywords = extractKeywords(message);
   const { data } = await supabase
-    .from("kb_chunks")
+    .schema("kb").from("kb_chunks")
     .select("content")
     .eq("organization_id", organizationId)
     .textSearch("search_vector", keywords, { type: "websearch" })
@@ -1050,7 +1050,7 @@ async function getOrUpdateSummary(
   }
 
   const { data: msgs } = await supabase
-    .from("messages")
+    .schema("messaging").from("messages")
     .select("role, content")
     .eq("conversation_id", conversationId)
     .in("status", statuses)
@@ -1078,7 +1078,7 @@ async function getOrUpdateSummary(
     const summary = response.content[0]?.type === "text" ? response.content[0].text : "";
 
     await supabase
-      .from("conversations")
+      .schema("messaging").from("conversations")
       .update({ summary, summary_msg_count: messagesToSummarize })
       .eq("id", conversationId);
 
@@ -1300,7 +1300,7 @@ async function upsertBucket(
   expiresAt: Date
 ): Promise<number | null> {
   const { data: inserted, error: insertError } = await supabase
-    .from("rate_limit_buckets")
+    .schema("system").from("rate_limit_buckets")
     .upsert(
       {
         bucket_key: bucketKey,
@@ -1375,7 +1375,7 @@ async function handleLimitExceeded(
 ): Promise<void> {
   // Disable the widget
   await supabase
-    .from("widget_configs")
+    .schema("core").from("widget_configs")
     .update({
       enabled: false,
       disable_reason: "usage_limit",
@@ -1385,7 +1385,7 @@ async function handleLimitExceeded(
 
   // Mark notification as sent — prevent duplicate emails
   const { data: updated } = await supabase
-    .from("organizations")
+    .schema("core").from("organizations")
     .update({ limit_notified_at: new Date().toISOString() })
     .eq("id", organizationId)
     .is("limit_notified_at", null)
@@ -1396,7 +1396,7 @@ async function handleLimitExceeded(
 
   // Load the active email provider for sending the notification
   const { data: provider } = await supabase
-    .from("email_providers")
+    .schema("comms").from("email_providers")
     .select(
       "provider_account_email, access_token_encrypted, " +
       "refresh_token_encrypted, token_expires_at"
@@ -1697,7 +1697,7 @@ async function loadCalendlyIntegration(
   organizationId: string
 ): Promise<Record<string, unknown> | null> {
   const { data, error } = await supabase
-    .from("integrations")
+    .schema("comms").from("integrations")
     .select("*")
     .eq("organization_id", organizationId)
     .eq("integration_type", "calendly")
@@ -1714,7 +1714,7 @@ async function loadGoogleCalendarProvider(
 ): Promise<Record<string, unknown> | null> {
   // Priority 1: Dedicated google_calendar integration
   const { data: integration } = await supabase
-    .from("integrations")
+    .schema("comms").from("integrations")
     .select("id, status, credentials_encrypted, credentials_expires_at, config, error_count")
     .eq("organization_id", organizationId)
     .eq("integration_type", "google_calendar")
@@ -1732,7 +1732,7 @@ async function loadGoogleCalendarProvider(
 
   // Priority 2: Gmail provider with calendar scope
   const { data, error } = await supabase
-    .from("email_providers")
+    .schema("comms").from("email_providers")
     .select("id, organization_id, provider, status, granted_scopes, access_token_encrypted, refresh_token_encrypted, token_expires_at, google_calendar_id")
     .eq("organization_id", organizationId)
     .eq("provider", "google")
@@ -1815,7 +1815,7 @@ async function getGoogleAccessToken(
       const errText = await res.text();
       console.error("Google Calendar token refresh failed:", errText);
       await supabase
-        .from("integrations")
+        .schema("comms").from("integrations")
         .update({
           status: "error",
           last_error: `Token refresh failed: ${res.status}`,
@@ -1834,7 +1834,7 @@ async function getGoogleAccessToken(
     const newExpiry = new Date(Date.now() + tokens.expires_in * 1000).toISOString();
 
     await supabase
-      .from("integrations")
+      .schema("comms").from("integrations")
       .update({
         credentials_encrypted: encryptedCreds,
         credentials_expires_at: newExpiry,
@@ -1870,7 +1870,7 @@ async function getGoogleAccessToken(
     const errText = await res.text();
     console.error("Google token refresh failed:", errText);
     await supabase
-      .from("email_providers")
+      .schema("comms").from("email_providers")
       .update({ status: "expired", error_message: `Token refresh failed: ${res.status}` })
       .eq("id", provider.id);
     throw new Error("Google token refresh failed");
@@ -1881,7 +1881,7 @@ async function getGoogleAccessToken(
   const newExpiry = new Date(Date.now() + tokens.expires_in * 1000).toISOString();
 
   await supabase
-    .from("email_providers")
+    .schema("comms").from("email_providers")
     .update({
       access_token_encrypted: encryptedAccess,
       token_expires_at: newExpiry,
@@ -2046,7 +2046,7 @@ async function getCalendlyAccessToken(
   if (!tokenResponse.ok) {
     const err = await tokenResponse.text();
     await supabase
-      .from("integrations")
+      .schema("comms").from("integrations")
       .update({
         status: "error",
         last_error: `Token refresh failed: ${err}`,
@@ -2066,7 +2066,7 @@ async function getCalendlyAccessToken(
   const encryptedCredentials = await encrypt(newCredentials, encryptionKey);
 
   await supabase
-    .from("integrations")
+    .schema("comms").from("integrations")
     .update({
       credentials_encrypted: encryptedCredentials,
       credentials_expires_at: newExpiry.toISOString(),

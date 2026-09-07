@@ -41,7 +41,7 @@ Deno.serve(async (req: Request) => {
 
     // Look up widget config by API key
     const { data: config, error } = await supabase
-      .from("widget_configs")
+      .schema("core").from("widget_configs")
       .select(`
         enabled,
         disable_reason,

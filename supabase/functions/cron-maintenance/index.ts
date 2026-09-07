@@ -82,7 +82,7 @@ Deno.serve(async (req: Request) => {
   const gmailRenewalCutoff = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString();
 
   const { data: gmailProviders, error: gmailFetchError } = await supabase
-    .from("email_providers")
+    .schema("comms").from("email_providers")
     .select("id, organization_id, provider_account_email, access_token_encrypted, refresh_token_encrypted, token_expires_at, watch_expiry")
     .eq("provider", "google")
     .eq("status", "active")
@@ -122,7 +122,7 @@ Deno.serve(async (req: Request) => {
         const newExpiry = new Date(parseInt(watchData.expiration)).toISOString();
 
         await supabase
-          .from("email_providers")
+          .schema("comms").from("email_providers")
           .update({
             watch_expiry: newExpiry,
             last_history_id: watchData.historyId ?? provider.last_history_id,
@@ -136,7 +136,7 @@ Deno.serve(async (req: Request) => {
         console.error(`Failed to renew Gmail watch for ${provider.provider_account_email}:`, e.message);
 
         await supabase
-          .from("email_providers")
+          .schema("comms").from("email_providers")
           .update({ error_message: `Watch renewal failed: ${e.message}` })
           .eq("id", provider.id);
 
@@ -153,7 +153,7 @@ Deno.serve(async (req: Request) => {
   const graphRenewalCutoff = new Date(Date.now() + 1 * 24 * 60 * 60 * 1000).toISOString();
 
   const { data: msProviders, error: msFetchError } = await supabase
-    .from("email_providers")
+    .schema("comms").from("email_providers")
     .select("id, organization_id, provider_account_email, access_token_encrypted, refresh_token_encrypted, token_expires_at, watch_expiry, last_history_id")
     .eq("provider", "microsoft")
     .eq("status", "active")
@@ -209,7 +209,7 @@ Deno.serve(async (req: Request) => {
         }
 
         await supabase
-          .from("email_providers")
+          .schema("comms").from("email_providers")
           .update({
             last_history_id: finalSubscriptionId,
             watch_expiry: finalExpiry,
@@ -222,7 +222,7 @@ Deno.serve(async (req: Request) => {
         console.error(`Failed to renew Graph subscription for ${provider.provider_account_email}:`, e.message);
 
         await supabase
-          .from("email_providers")
+          .schema("comms").from("email_providers")
           .update({ error_message: `Subscription renewal failed: ${e.message}` })
           .eq("id", provider.id);
 
@@ -237,7 +237,7 @@ Deno.serve(async (req: Request) => {
   // Reset emails_sent_today for any provider whose last_reset_date is before today.
 
   const { data: resetResult, error: resetError } = await supabase
-    .from("email_providers")
+    .schema("comms").from("email_providers")
     .update({
       emails_sent_today: 0,
       last_reset_date: new Date().toISOString().split("T")[0],
@@ -265,7 +265,7 @@ Deno.serve(async (req: Request) => {
   const threeDaysOut = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
 
   const { data: expiringOrgs, error: expiringErr } = await supabase
-    .from("organizations")
+    .schema("core").from("organizations")
     .select("id, name, subscription_end_date")
     .not("subscription_end_date", "is", null)
     .gt("subscription_end_date", nowIso)          // not yet expired
@@ -308,7 +308,7 @@ Deno.serve(async (req: Request) => {
 
       // Mark reminder as sent so we don't re-send tomorrow
       await supabase
-        .from("organizations")
+        .schema("core").from("organizations")
         .update({ suspension_warning_sent_at: nowIso })
         .eq("id", org.id);
 
@@ -324,7 +324,7 @@ Deno.serve(async (req: Request) => {
   // period set get a warning email + a grace_period_ends_at 7 days out.
   // The widget stays enabled until the grace period ends.
   const { data: newlyExpired, error: newlyExpiredErr } = await supabase
-    .from("organizations")
+    .schema("core").from("organizations")
     .select("id, name, subscription_end_date")
     .not("subscription_end_date", "is", null)
     .lt("subscription_end_date", nowIso)
@@ -343,7 +343,7 @@ Deno.serve(async (req: Request) => {
       );
 
       await supabase
-        .from("organizations")
+        .schema("core").from("organizations")
         .update({
           grace_period_ends_at: graceEnd.toISOString(),
           suspension_warning_sent_at: nowIso,
@@ -383,7 +383,7 @@ Deno.serve(async (req: Request) => {
   const oneDayOut = new Date(Date.now() + 1 * 24 * 60 * 60 * 1000).toISOString();
 
   const { data: finalWarnOrgs, error: finalWarnErr } = await supabase
-    .from("organizations")
+    .schema("core").from("organizations")
     .select("id, name, grace_period_ends_at")
     .not("grace_period_ends_at", "is", null)
     .gt("grace_period_ends_at", nowIso)            // grace hasn't ended yet
@@ -404,7 +404,7 @@ Deno.serve(async (req: Request) => {
       // Re-fetch to check suspension_warning_sent_at (not in the select above
       // to keep the query simple)
       const { data: orgCheck } = await supabase
-        .from("organizations")
+        .schema("core").from("organizations")
         .select("suspension_warning_sent_at")
         .eq("id", org.id)
         .single();
@@ -444,7 +444,7 @@ Deno.serve(async (req: Request) => {
 
       // Update timestamp so we don't re-send
       await supabase
-        .from("organizations")
+        .schema("core").from("organizations")
         .update({ suspension_warning_sent_at: nowIso })
         .eq("id", org.id);
 
@@ -457,7 +457,7 @@ Deno.serve(async (req: Request) => {
 
   // ── Task 4b: Disable orgs whose grace period has ended ─────────────────────
   const { data: pastGrace, error: pastGraceErr } = await supabase
-    .from("organizations")
+    .schema("core").from("organizations")
     .select("id, name, grace_period_ends_at")
     .not("grace_period_ends_at", "is", null)
     .lt("grace_period_ends_at", nowIso)
@@ -470,12 +470,12 @@ Deno.serve(async (req: Request) => {
 
     for (const org of pastGrace) {
       await supabase
-        .from("organizations")
+        .schema("core").from("organizations")
         .update({ ai_responses_enabled: false })
         .eq("id", org.id);
 
       await supabase
-        .from("widget_configs")
+        .schema("core").from("widget_configs")
         .update({
           enabled: false,
           disable_reason: "subscription_expired",
@@ -523,7 +523,7 @@ Deno.serve(async (req: Request) => {
   // conversation that ends up with zero remaining messages.
   try {
     const { data: retentionOrgs, error: retentionOrgsErr } = await supabase
-      .from("organizations")
+      .schema("core").from("organizations")
       .select("id, retention_days");
 
     if (retentionOrgsErr) throw retentionOrgsErr;
@@ -533,7 +533,7 @@ Deno.serve(async (req: Request) => {
       const cutoffIso = new Date(Date.now() - days * 86400000).toISOString();
 
       const { data: deletedMsgs, error: msgErr } = await supabase
-        .from("messages")
+        .schema("messaging").from("messages")
         .delete()
         .eq("organization_id", org.id)
         .lt("created_at", cutoffIso)
@@ -558,7 +558,7 @@ Deno.serve(async (req: Request) => {
 
       for (const convId of touchedConvIds) {
         const { count, error: countErr } = await supabase
-          .from("messages")
+          .schema("messaging").from("messages")
           .select("id", { count: "exact", head: true })
           .eq("conversation_id", convId);
 
@@ -570,7 +570,7 @@ Deno.serve(async (req: Request) => {
 
         if ((count ?? 0) === 0) {
           const { error: convErr } = await supabase
-            .from("conversations")
+            .schema("messaging").from("conversations")
             .delete()
             .eq("id", convId)
             .eq("organization_id", org.id);
@@ -602,7 +602,7 @@ Deno.serve(async (req: Request) => {
   try {
     const exportNowIso = new Date().toISOString();
     const { data: dueSchedules, error: dueErr } = await supabase
-      .from("export_schedules")
+      .schema("comms").from("export_schedules")
       .select("id, organization_id, frequency, recipient_email")
       .eq("is_active", true)
       .lte("next_run_at", exportNowIso);
@@ -643,7 +643,7 @@ Deno.serve(async (req: Request) => {
         const payload = await res.json();
 
         await supabase
-          .from("export_schedules")
+          .schema("comms").from("export_schedules")
           .update({
             last_run_at: exportNowIso,
             last_run_status: res.ok ? "success" : "error",
@@ -663,7 +663,7 @@ Deno.serve(async (req: Request) => {
         console.error(`[exports] schedule ${sch.id} failed:`, (e as Error).message);
         results.export_errors++;
         await supabase
-          .from("export_schedules")
+          .schema("comms").from("export_schedules")
           .update({
             last_run_at: exportNowIso,
             last_run_status: "error",
@@ -686,7 +686,7 @@ Deno.serve(async (req: Request) => {
   try {
     const calendlyRefreshCutoff = new Date(Date.now() + 30 * 60 * 1000).toISOString();
     const { data: calendlyIntegrations } = await supabase
-      .from("integrations")
+      .schema("comms").from("integrations")
       .select("*")
       .eq("integration_type", "calendly")
       .eq("status", "active")
@@ -711,7 +711,7 @@ Deno.serve(async (req: Request) => {
         if (!tokenResponse.ok) {
           const errText = await tokenResponse.text();
           console.error(`Calendly token refresh failed for integration ${integration.id}:`, errText);
-          await supabase.from("integrations").update({
+          await supabase.schema("comms").from("integrations").update({
             status: "error",
             last_error: `Token refresh failed: ${errText}`,
             error_count: (integration.error_count || 0) + 1,
@@ -756,7 +756,7 @@ Deno.serve(async (req: Request) => {
           console.warn("Event types sync failed, keeping existing:", (e as Error).message);
         }
 
-        await supabase.from("integrations").update({
+        await supabase.schema("comms").from("integrations").update({
           credentials_encrypted: encryptedCredentials,
           credentials_expires_at: newExpiry.toISOString(),
           config: updatedConfig,
@@ -786,7 +786,7 @@ Deno.serve(async (req: Request) => {
   try {
     const gcalRefreshCutoff = new Date(Date.now() + 30 * 60 * 1000).toISOString();
     const { data: gcalIntegrations } = await supabase
-      .from("integrations")
+      .schema("comms").from("integrations")
       .select("*")
       .eq("integration_type", "google_calendar")
       .eq("status", "active")
@@ -811,7 +811,7 @@ Deno.serve(async (req: Request) => {
         if (!tokenResponse.ok) {
           const errText = await tokenResponse.text();
           console.error(`Google Calendar token refresh failed for integration ${integration.id}:`, errText);
-          await supabase.from("integrations").update({
+          await supabase.schema("comms").from("integrations").update({
             status: "error",
             last_error: `Token refresh failed: ${errText}`,
             error_count: (integration.error_count || 0) + 1,
@@ -851,7 +851,7 @@ Deno.serve(async (req: Request) => {
           console.warn("Calendar list sync failed, keeping existing:", (e as Error).message);
         }
 
-        await supabase.from("integrations").update({
+        await supabase.schema("comms").from("integrations").update({
           credentials_encrypted: encryptedCredentials,
           credentials_expires_at: newExpiry.toISOString(),
           config: updatedConfig,
@@ -1058,7 +1058,7 @@ async function getAccessToken(
   if (!tokenResponse.ok) {
     const err = await tokenResponse.text();
     await supabase
-      .from("email_providers")
+      .schema("comms").from("email_providers")
       .update({ status: "expired", error_message: `Token refresh failed: ${err}` })
       .eq("id", provider.id);
     throw new Error(`Token refresh failed: ${err}`);
@@ -1069,7 +1069,7 @@ async function getAccessToken(
   const encryptedNewAccess = await encrypt(tokens.access_token, encryptionKey);
 
   await supabase
-    .from("email_providers")
+    .schema("comms").from("email_providers")
     .update({
       access_token_encrypted: encryptedNewAccess,
       token_expires_at: newExpiry.toISOString(),
@@ -1092,7 +1092,7 @@ async function sendOrgNotification(
   body: string
 ): Promise<void> {
   const { data: provider } = await supabase
-    .from("email_providers")
+    .schema("comms").from("email_providers")
     .select("id, provider, provider_account_email, access_token_encrypted, refresh_token_encrypted, token_expires_at")
     .eq("organization_id", organizationId)
     .eq("status", "active")
@@ -1104,7 +1104,7 @@ async function sendOrgNotification(
   }
 
   const { data: recipients } = await supabase
-    .from("notification_recipients")
+    .schema("comms").from("notification_recipients")
     .select("email, name")
     .eq("organization_id", organizationId)
     .eq("is_active", true)

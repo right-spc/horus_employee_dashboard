@@ -127,7 +127,7 @@ async function processInboundEmail(
   // ── 2. LOAD ORGANIZATION CONFIG ────────────
   console.log("Looking up org ID:", payload.organization_id);
   const { data: org, error: orgError } = await supabase // TEMP
-    .from("organizations")
+    .schema("core").from("organizations")
     .select(`
       id,
       ai_responses_enabled,
@@ -186,7 +186,7 @@ async function processInboundEmail(
   // ── CHECK AI RESPONSES ENABLED ────────────
   if (!org.ai_responses_enabled) {
     const { data: disabledConv } = await supabase
-      .from("conversations")
+      .schema("messaging").from("conversations")
       .upsert(
         {
           organization_id: payload.organization_id,
@@ -224,7 +224,7 @@ async function processInboundEmail(
     const graceDeadline = new Date(endDate.getTime() + 7 * 24 * 60 * 60 * 1000);
     if (now > graceDeadline) {
       const { data: expiredConv } = await supabase
-        .from("conversations")
+        .schema("messaging").from("conversations")
         .upsert(
           {
             organization_id: payload.organization_id,
@@ -260,7 +260,7 @@ async function processInboundEmail(
   if (isOverLimit) {
     // Still save the inbound message so it's not lost
     const { data: limitConv } = await supabase
-      .from("conversations")
+      .schema("messaging").from("conversations")
       .upsert(
         {
           organization_id: payload.organization_id,
@@ -290,7 +290,7 @@ async function processInboundEmail(
   // ── 3. IDENTITY RESOLUTION ─────────────────
   // Look up sender by email alias
   const { data: alias } = await supabase
-    .from("contact_aliases")
+    .schema("crm").from("contact_aliases")
     .select("contact_id")
     .eq("organization_id", payload.organization_id)
     .eq("alias_type", "email")
@@ -303,13 +303,13 @@ async function processInboundEmail(
     contactId = alias.contact_id;
     // Update last_seen_at
     await supabase
-      .from("contacts")
+      .schema("crm").from("contacts")
       .update({ last_seen_at: new Date().toISOString() })
       .eq("id", contactId);
   } else {
     // Create new contact
     const { data: newContact, error: contactError } = await supabase
-      .from("contacts")
+      .schema("crm").from("contacts")
       .insert({
         organization_id: payload.organization_id,
         primary_email: payload.sender_email.toLowerCase().trim(),
@@ -325,7 +325,7 @@ async function processInboundEmail(
     contactId = newContact.id;
 
     // Create alias record
-    await supabase.from("contact_aliases").insert({
+    await supabase.schema("crm").from("contact_aliases").insert({
       contact_id: contactId,
       organization_id: payload.organization_id,
       alias_type: "email",
@@ -337,7 +337,7 @@ async function processInboundEmail(
   // ── 4. CONVERSATION RESOLUTION ─────────────
   // Upsert conversation by thread ID (unique per org+channel+thread)
   const { data: conversation, error: convError } = await supabase
-    .from("conversations")
+    .schema("messaging").from("conversations")
     .upsert(
       {
         organization_id: payload.organization_id,
@@ -378,7 +378,7 @@ async function processInboundEmail(
   // historyId notifications, so the same external_message_id may arrive
   // multiple times. Short-circuit if we've already processed it.
   const { data: existingMessage } = await supabase
-    .from("messages")
+    .schema("messaging").from("messages")
     .select("id")
     .eq("organization_id", payload.organization_id)
     .eq("external_message_id", payload.message_id)
@@ -391,7 +391,7 @@ async function processInboundEmail(
   }
 
   const { data: inboundMessage, error: msgError } = await supabase
-    .from("messages")
+    .schema("messaging").from("messages")
     .insert({
       conversation_id: conversation.id,
       organization_id: payload.organization_id,
@@ -408,7 +408,7 @@ async function processInboundEmail(
   }
 
   // ── 6. LOG ANALYTICS EVENT ─────────────────
-  await supabase.from("analytics_events").insert({
+  await supabase.schema("analytics").from("analytics_events").insert({
     organization_id: payload.organization_id,
     event_type: "message_received",
     metadata: {
@@ -422,7 +422,7 @@ async function processInboundEmail(
 
   // 7a. Conversation history — count total then decide: full window or summary + recent
   const { count: totalMsgCount } = await supabase
-    .from("messages")
+    .schema("messaging").from("messages")
     .select("*", { count: "exact", head: true })
     .eq("conversation_id", conversation.id)
     .in("status", ["sent", "auto_sent"]);
@@ -439,7 +439,7 @@ async function processInboundEmail(
     );
 
     const { data: recentMessages } = await supabase
-      .from("messages")
+      .schema("messaging").from("messages")
       .select("role, content, created_at")
       .eq("conversation_id", conversation.id)
       .in("status", ["sent", "auto_sent"])
@@ -449,7 +449,7 @@ async function processInboundEmail(
     history = (recentMessages ?? []).reverse();
   } else {
     const { data: historyMessages } = await supabase
-      .from("messages")
+      .schema("messaging").from("messages")
       .select("role, content, created_at")
       .eq("conversation_id", conversation.id)
       .in("status", ["sent", "auto_sent"])
@@ -649,7 +649,7 @@ async function processInboundEmail(
   // ── 12. ROUTE ──────────────────────────────
   if (parsed.code === "IGNORE") {
     // Save the AI decision but do nothing else — email stays unread
-    const { error: ignoreInsertError } = await supabase.from("messages").insert({
+    const { error: ignoreInsertError } = await supabase.schema("messaging").from("messages").insert({
       conversation_id: conversation.id,
       organization_id: payload.organization_id,
       role: "ai",
@@ -665,7 +665,7 @@ async function processInboundEmail(
     });
     console.log("IGNORE insert error:", ignoreInsertError);
 
-    await supabase.from("analytics_events").insert({
+    await supabase.schema("analytics").from("analytics_events").insert({
       organization_id: payload.organization_id,
       event_type: "ai_generated",
       metadata: {
@@ -680,7 +680,7 @@ async function processInboundEmail(
   if (parsed.code === "ESCALATE") {
     // Save message
     const { data: escalateMessage, error: escalateMsgError } = await supabase
-      .from("messages")
+      .schema("messaging").from("messages")
       .insert({
         conversation_id: conversation.id,
         organization_id: payload.organization_id,
@@ -707,7 +707,7 @@ async function processInboundEmail(
 
     // Flip conversation to escalated
     await supabase
-      .from("conversations")
+      .schema("messaging").from("conversations")
       .update({
         status: "escalated",
         escalation_reason: "AI determined human intervention required",
@@ -716,7 +716,7 @@ async function processInboundEmail(
       })
       .eq("id", conversation.id);
 
-    await supabase.from("analytics_events").insert({
+    await supabase.schema("analytics").from("analytics_events").insert({
       organization_id: payload.organization_id,
       event_type: "escalated",
       metadata: {
@@ -728,14 +728,14 @@ async function processInboundEmail(
 
     // Queue Claude's response for delivery to customer
     const escalateProvider = await supabase
-      .from("email_providers")
+      .schema("comms").from("email_providers")
       .select("id, provider")
       .eq("organization_id", payload.organization_id)
       .eq("status", "active")
       .maybeSingle();
 
     if (escalateProvider.data) {
-      await supabase.from("delivery_queue").insert({
+      await supabase.schema("messaging").from("delivery_queue").insert({
         message_id: escalateMessage.id,
         organization_id: payload.organization_id,
         provider: escalateProvider.data.provider,
@@ -758,7 +758,7 @@ async function processInboundEmail(
 
     // Update last_ai_response_at
     await supabase
-      .from("conversations")
+      .schema("messaging").from("conversations")
       .update({ last_ai_response_at: new Date().toISOString() })
       .eq("id", conversation.id);
 
@@ -788,7 +788,7 @@ async function processInboundEmail(
 
   // Save the AI draft
   const { data: aiMessage, error: aiMsgError } = await supabase
-    .from("messages")
+    .schema("messaging").from("messages")
     .insert({
       conversation_id: conversation.id,
       organization_id: payload.organization_id,
@@ -812,7 +812,7 @@ async function processInboundEmail(
     throw new Error(`Failed to save AI message: ${aiMsgError?.message}`);
   }
 
-  await supabase.from("analytics_events").insert({
+  await supabase.schema("analytics").from("analytics_events").insert({
     organization_id: payload.organization_id,
     event_type: "ai_generated",
     metadata: {
@@ -826,14 +826,14 @@ async function processInboundEmail(
   // Queue for delivery if auto-sending
   if (shouldAutoSend) {
     const emailProvider = await supabase
-      .from("email_providers")
+      .schema("comms").from("email_providers")
       .select("id, provider")
       .eq("organization_id", payload.organization_id)
       .eq("status", "active")
       .maybeSingle();
 
     if (emailProvider.data) {
-      await supabase.from("delivery_queue").insert({
+      await supabase.schema("messaging").from("delivery_queue").insert({
         message_id: aiMessage.id,
         organization_id: payload.organization_id,
         provider: emailProvider.data.provider,
@@ -845,7 +845,7 @@ async function processInboundEmail(
 
   // Update last_ai_response_at on conversation
   await supabase
-    .from("conversations")
+    .schema("messaging").from("conversations")
     .update({ last_ai_response_at: new Date().toISOString() })
     .eq("id", conversation.id);
 
@@ -896,7 +896,7 @@ async function saveCustomerMessage(
     external_message_id: string;
   }
 ) {
-  return supabase.from("messages").insert({
+  return supabase.schema("messaging").from("messages").insert({
     ...params,
     role: "customer",
     status: "sent",
@@ -937,7 +937,7 @@ async function selectKbChunks(
   try {
     // 1. Load all chunks for the org
     const { data: allChunks } = await supabase
-      .from("kb_chunks")
+      .schema("kb").from("kb_chunks")
       .select("chunk_code, content")
       .eq("organization_id", organizationId)
       .order("chunk_index", { ascending: true });
@@ -1002,7 +1002,7 @@ async function fallbackSearch(
 ): Promise<Array<{ content: string }>> {
   const keywords = extractKeywords(message);
   const { data } = await supabase
-    .from("kb_chunks")
+    .schema("kb").from("kb_chunks")
     .select("content")
     .eq("organization_id", organizationId)
     .textSearch("search_vector", keywords, { type: "websearch" })
@@ -1029,7 +1029,7 @@ async function getOrUpdateSummary(
 
   // Load messages that need summarizing (oldest N, excluding the recent ones we keep in full)
   const { data: msgs } = await supabase
-    .from("messages")
+    .schema("messaging").from("messages")
     .select("role, content")
     .eq("conversation_id", conversationId)
     .in("status", statuses)
@@ -1057,7 +1057,7 @@ async function getOrUpdateSummary(
     const summary = response.content[0]?.type === "text" ? response.content[0].text : "";
 
     await supabase
-      .from("conversations")
+      .schema("messaging").from("conversations")
       .update({ summary, summary_msg_count: messagesToSummarize })
       .eq("id", conversationId);
 
@@ -1322,7 +1322,7 @@ async function resolvePubSubNotification(
 
   // Find the matching provider record so we know the org and have credentials
   const { data: provider, error: providerError } = await supabase
-    .from("email_providers")
+    .schema("comms").from("email_providers")
     .select(
       "id, organization_id, provider, last_history_id, " +
       "access_token_encrypted, refresh_token_encrypted, token_expires_at"
@@ -1352,7 +1352,7 @@ async function resolvePubSubNotification(
   if (newMessages.length === 0) {
     // Update historyId even if no new messages, so we stay current
     await supabase
-      .from("email_providers")
+      .schema("comms").from("email_providers")
       .update({ last_history_id: historyId })
       .eq("id", provider.id);
     return [];
@@ -1377,7 +1377,7 @@ async function resolvePubSubNotification(
 
   // Advance the history cursor so next notification starts from here
   await supabase
-    .from("email_providers")
+    .schema("comms").from("email_providers")
     .update({ last_history_id: historyId })
     .eq("id", provider.id);
 
@@ -1550,7 +1550,7 @@ async function loadCalendlyIntegration(
   organizationId: string
 ): Promise<Record<string, unknown> | null> {
   const { data, error } = await supabase
-    .from("integrations")
+    .schema("comms").from("integrations")
     .select("*")
     .eq("organization_id", organizationId)
     .eq("integration_type", "calendly")
@@ -1567,7 +1567,7 @@ async function loadGoogleCalendarProvider(
 ): Promise<Record<string, unknown> | null> {
   // Priority 1: Dedicated google_calendar integration
   const { data: integration } = await supabase
-    .from("integrations")
+    .schema("comms").from("integrations")
     .select("id, status, credentials_encrypted, credentials_expires_at, config, error_count")
     .eq("organization_id", organizationId)
     .eq("integration_type", "google_calendar")
@@ -1585,7 +1585,7 @@ async function loadGoogleCalendarProvider(
 
   // Priority 2: Gmail provider with calendar scope
   const { data, error } = await supabase
-    .from("email_providers")
+    .schema("comms").from("email_providers")
     .select("id, organization_id, provider, status, granted_scopes, access_token_encrypted, refresh_token_encrypted, token_expires_at, google_calendar_id")
     .eq("organization_id", organizationId)
     .eq("provider", "google")
@@ -1756,7 +1756,7 @@ async function getCalendlyAccessToken(
   if (!tokenResponse.ok) {
     const err = await tokenResponse.text();
     await supabase
-      .from("integrations")
+      .schema("comms").from("integrations")
       .update({
         status: "error",
         last_error: `Token refresh failed: ${err}`,
@@ -1776,7 +1776,7 @@ async function getCalendlyAccessToken(
   const encryptedCredentials = await encrypt(newCredentials, encryptionKey);
 
   await supabase
-    .from("integrations")
+    .schema("comms").from("integrations")
     .update({
       credentials_encrypted: encryptedCredentials,
       credentials_expires_at: newExpiry.toISOString(),
@@ -2123,7 +2123,7 @@ async function getGmailAccessToken(
       const err = await tokenResponse.text();
       console.error("Google Calendar token refresh failed:", err);
       await supabase
-        .from("integrations")
+        .schema("comms").from("integrations")
         .update({
           status: "error",
           last_error: `Token refresh failed: ${err}`,
@@ -2142,7 +2142,7 @@ async function getGmailAccessToken(
     const newExpiry = new Date(now.getTime() + tokens.expires_in * 1000);
 
     await supabase
-      .from("integrations")
+      .schema("comms").from("integrations")
       .update({
         credentials_encrypted: encryptedCreds,
         credentials_expires_at: newExpiry.toISOString(),
@@ -2191,7 +2191,7 @@ async function getGmailAccessToken(
     const err = await tokenResponse.text();
     // Mark provider as expired so the org knows to re-authenticate
     await supabase
-      .from("email_providers")
+      .schema("comms").from("email_providers")
       .update({ status: "expired", error_message: `Token refresh failed: ${err}` })
       .eq("id", provider.id);
     throw new Error(`Token refresh failed: ${err}`);
@@ -2203,7 +2203,7 @@ async function getGmailAccessToken(
   // Encrypt and store refreshed token
   const encryptedNewAccess = await encrypt(tokens.access_token, encryptionKey);
   await supabase
-    .from("email_providers")
+    .schema("comms").from("email_providers")
     .update({
       access_token_encrypted: encryptedNewAccess,
       token_expires_at: newExpiry.toISOString(),
@@ -2353,7 +2353,7 @@ async function sendOrgNotification(
   escalationSubType?: "frustrated" | "kb_gap" | "lead"
 ): Promise<void> {
   const { data: provider } = await supabase
-    .from("email_providers")
+    .schema("comms").from("email_providers")
     .select("id, provider, provider_account_email, access_token_encrypted, refresh_token_encrypted, token_expires_at")
     .eq("organization_id", organizationId)
     .eq("status", "active")
@@ -2365,7 +2365,7 @@ async function sendOrgNotification(
   }
 
   let recipientQuery = supabase
-    .from("notification_recipients")
+    .schema("comms").from("notification_recipients")
     .select("email, name")
     .eq("organization_id", organizationId)
     .eq("is_active", true);
@@ -2606,7 +2606,7 @@ async function handleLimitExceeded(
   organizationId: string
 ): Promise<void> {
   await supabase
-    .from("widget_configs")
+    .schema("core").from("widget_configs")
     .update({
       enabled: false,
       disable_reason: "usage_limit",
@@ -2615,7 +2615,7 @@ async function handleLimitExceeded(
     .eq("organization_id", organizationId);
 
   const { data: updated } = await supabase
-    .from("organizations")
+    .schema("core").from("organizations")
     .update({ limit_notified_at: new Date().toISOString() })
     .eq("id", organizationId)
     .is("limit_notified_at", null)

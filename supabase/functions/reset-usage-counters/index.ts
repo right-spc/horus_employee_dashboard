@@ -53,14 +53,14 @@ Deno.serve(async (req: Request) => {
     // the orgs whose cycle anchor day is today (i.e. their new effective
     // period just started).
     const { data: orgIds } = await supabase
-      .from("organizations")
+      .schema("core").from("organizations")
       .select("id")
       .eq("cycle_anchor_day", day);
 
     if (orgIds && orgIds.length > 0) {
       const ids = orgIds.map((o: { id: string }) => o.id);
       await supabase
-        .from("widget_configs")
+        .schema("core").from("widget_configs")
         .update({ enabled: true, disable_reason: null, disable_message: null })
         .in("organization_id", ids)
         .eq("disable_reason", "usage_limit");

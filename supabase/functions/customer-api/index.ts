@@ -90,13 +90,13 @@ Deno.serve(async (req: Request) => {
   // Both are checked; results are merged and deduplicated by org_id.
   const [{ data: recipients }, { data: providers }] = await Promise.all([
     adminClient
-      .from("notification_recipients")
+      .schema("comms").from("notification_recipients")
       .select("id, organization_id, name, email")
       .ilike("email", userEmail)
       .eq("is_active", true)
       .contains("notify_on", ["system"]),
     adminClient
-      .from("email_providers")
+      .schema("comms").from("email_providers")
       .select("id, organization_id, provider_account_email")
       .ilike("provider_account_email", userEmail)
       .eq("status", "active"),
@@ -148,7 +148,7 @@ Deno.serve(async (req: Request) => {
       // ── Me ──────────────────────────────────────────────────────────────
       case "me": {
         const { data: org } = await adminClient
-          .from("organizations")
+          .schema("core").from("organizations")
           .select("id, name, slug")
           .eq("id", orgId)
           .single();
@@ -157,7 +157,7 @@ Deno.serve(async (req: Request) => {
         let orgs = null;
         if (allOrgs.length > 1) {
           const { data: orgList } = await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .select("id, name, slug")
             .in("id", allOrgs);
           orgs = orgList;
@@ -178,21 +178,21 @@ Deno.serve(async (req: Request) => {
       case "get_overview": {
         const [{ data: org }, { data: providers }, { data: widget }] = await Promise.all([
           adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .select(
               "name, messages_used_this_month, message_limit_per_month, ai_responses_enabled, auto_send_enabled, limit_exceeded_at"
             )
             .eq("id", orgId)
             .single(),
           adminClient
-            .from("email_providers")
+            .schema("comms").from("email_providers")
             .select(
               "provider, provider_account_email, status, emails_sent_today, daily_send_limit, watch_expiry"
             )
             .eq("organization_id", orgId)
             .limit(1),
           adminClient
-            .from("widget_configs")
+            .schema("core").from("widget_configs")
             .select("id, enabled, api_key")
             .eq("organization_id", orgId)
             .maybeSingle(),
@@ -215,7 +215,7 @@ Deno.serve(async (req: Request) => {
         const filter = body.filter as string | undefined;
 
         let query = adminClient
-          .from("conversations")
+          .schema("messaging").from("conversations")
           .select(
             "id, channel, customer_email, customer_phone, subject, status, ai_enabled, last_message_at, escalation_type, lead_priority, is_starred, last_read_at, contact:contacts(name)"
           )
@@ -228,7 +228,7 @@ Deno.serve(async (req: Request) => {
           // For simplicity: show all conversations and let the frontend highlight ignored ones
           // Actually, let's query messages with IGNORE routing
           const { data: ignoredConvoIds } = await adminClient
-            .from("messages")
+            .schema("messaging").from("messages")
             .select("conversation_id")
             .eq("routing_code", "IGNORE")
             .not("conversation_id", "is", null);
@@ -250,7 +250,7 @@ Deno.serve(async (req: Request) => {
 
         if (convoIds.length > 0) {
           const { data: recentMsgs } = await adminClient
-            .from("messages")
+            .schema("messaging").from("messages")
             .select("conversation_id, content, created_at")
             .in("conversation_id", convoIds)
             .order("created_at", { ascending: false })
@@ -289,7 +289,7 @@ Deno.serve(async (req: Request) => {
         if (!conversation_id) return err("Missing conversation_id", 400, cors);
 
         const { data: convoRow, error: convoErr } = await adminClient
-          .from("conversations")
+          .schema("messaging").from("conversations")
           .select(
             "id, channel, customer_email, customer_phone, subject, status, ai_enabled, last_message_at, escalation_type, lead_priority, is_starred, last_read_at, contact:contacts(name)"
           )
@@ -310,7 +310,7 @@ Deno.serve(async (req: Request) => {
         };
 
         const { data: messages, error: msgErr } = await adminClient
-          .from("messages")
+          .schema("messaging").from("messages")
           .select(
             "id, role, content, status, routing_code, escalation_type, lead_priority, confidence_score_reported, created_at"
           )
@@ -330,7 +330,7 @@ Deno.serve(async (req: Request) => {
         if (!escType) return err("Missing escalation_type", 400, cors);
 
         let query = adminClient
-          .from("conversations")
+          .schema("messaging").from("conversations")
           .select(
             "id, channel, customer_email, subject, status, ai_enabled, last_message_at, escalation_type, lead_priority"
           )
@@ -356,7 +356,7 @@ Deno.serve(async (req: Request) => {
           return err("Missing conversation_id or ai_enabled", 400, cors);
 
         const { error } = await adminClient
-          .from("conversations")
+          .schema("messaging").from("conversations")
           .update({ ai_enabled: ai_enabled as boolean })
           .eq("id", conversation_id)
           .eq("organization_id", orgId);
@@ -371,7 +371,7 @@ Deno.serve(async (req: Request) => {
         if (!conversation_id) return err("Missing conversation_id", 400, cors);
 
         const { error } = await adminClient
-          .from("conversations")
+          .schema("messaging").from("conversations")
           .update({ last_read_at: new Date().toISOString() })
           .eq("id", conversation_id)
           .eq("organization_id", orgId);
@@ -387,7 +387,7 @@ Deno.serve(async (req: Request) => {
           return err("Missing conversation_id or starred", 400, cors);
 
         const { error } = await adminClient
-          .from("conversations")
+          .schema("messaging").from("conversations")
           .update({ is_starred: starred as boolean })
           .eq("id", conversation_id)
           .eq("organization_id", orgId);
@@ -399,7 +399,7 @@ Deno.serve(async (req: Request) => {
       // ── Get AI settings ─────────────────────────────────────────────────
       case "get_ai_settings": {
         const { data: org, error } = await adminClient
-          .from("organizations")
+          .schema("core").from("organizations")
           .select("ai_tone, ai_system_prompt, retention_days, auto_delete_enabled")
           .eq("id", orgId)
           .single();
@@ -430,7 +430,7 @@ Deno.serve(async (req: Request) => {
         // The system prompt has a version counter — bump it on every change.
         if ("ai_system_prompt" in patch) {
           const { data: cur } = await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .select("ai_system_prompt_version")
             .eq("id", orgId)
             .single();
@@ -439,7 +439,7 @@ Deno.serve(async (req: Request) => {
         }
 
         const { error } = await adminClient
-          .from("organizations")
+          .schema("core").from("organizations")
           .update(patch)
           .eq("id", orgId);
 
@@ -453,7 +453,7 @@ Deno.serve(async (req: Request) => {
         if (enabled === undefined) return err("Missing enabled", 400, cors);
 
         const { error } = await adminClient
-          .from("widget_configs")
+          .schema("core").from("widget_configs")
           .update({
             enabled: enabled as boolean,
             disable_reason: enabled ? null : "manual",
@@ -470,7 +470,7 @@ Deno.serve(async (req: Request) => {
         if (enabled === undefined) return err("Missing enabled", 400, cors);
 
         const { error } = await adminClient
-          .from("organizations")
+          .schema("core").from("organizations")
           .update({ ai_responses_enabled: enabled as boolean })
           .eq("id", orgId);
 
@@ -481,7 +481,7 @@ Deno.serve(async (req: Request) => {
       // ── Get widget config ───────────────────────────────────────────────
       case "get_widget": {
         const { data: widget } = await adminClient
-          .from("widget_configs")
+          .schema("core").from("widget_configs")
           .select("*")
           .eq("organization_id", orgId)
           .maybeSingle();
@@ -495,7 +495,7 @@ Deno.serve(async (req: Request) => {
         if (!updates) return err("Missing updates", 400, cors);
 
         const { error } = await adminClient
-          .from("widget_configs")
+          .schema("core").from("widget_configs")
           .update(updates)
           .eq("organization_id", orgId);
 
@@ -506,7 +506,7 @@ Deno.serve(async (req: Request) => {
       // ── Get email setup ─────────────────────────────────────────────────
       case "get_email_setup": {
         const { data: providers } = await adminClient
-          .from("email_providers")
+          .schema("comms").from("email_providers")
           .select(
             "provider, provider_account_email, status, emails_sent_today, daily_send_limit, watch_expiry"
           )
@@ -548,7 +548,7 @@ Deno.serve(async (req: Request) => {
       // ── List notification recipients ────────────────────────────────────
       case "list_recipients": {
         const { data, error } = await adminClient
-          .from("notification_recipients")
+          .schema("comms").from("notification_recipients")
           .select("id, email, name, notify_on, is_active")
           .eq("organization_id", orgId)
           .order("created_at", { ascending: true });
@@ -563,7 +563,7 @@ Deno.serve(async (req: Request) => {
         if (!email) return err("Missing email", 400, cors);
 
         const { data, error } = await adminClient
-          .from("notification_recipients")
+          .schema("comms").from("notification_recipients")
           .insert({
             organization_id: orgId,
             email,
@@ -590,7 +590,7 @@ Deno.serve(async (req: Request) => {
         delete updates.organization_id; // Never allow org override
 
         const { error } = await adminClient
-          .from("notification_recipients")
+          .schema("comms").from("notification_recipients")
           .update(updates)
           .eq("id", recipient_id)
           .eq("organization_id", orgId);
@@ -605,7 +605,7 @@ Deno.serve(async (req: Request) => {
         if (!recipient_id) return err("Missing recipient_id", 400, cors);
 
         const { error } = await adminClient
-          .from("notification_recipients")
+          .schema("comms").from("notification_recipients")
           .delete()
           .eq("id", recipient_id)
           .eq("organization_id", orgId);
@@ -617,7 +617,7 @@ Deno.serve(async (req: Request) => {
       // ── List KB documents (read-only) ───────────────────────────────────
       case "list_kb_docs": {
         const { data, error } = await adminClient
-          .from("kb_documents")
+          .schema("kb").from("kb_documents")
           .select("id, title, file_type, status, created_at")
           .eq("organization_id", orgId)
           .order("created_at", { ascending: false });
@@ -633,7 +633,7 @@ Deno.serve(async (req: Request) => {
 
         // Verify the doc belongs to this org
         const { data: doc } = await adminClient
-          .from("kb_documents")
+          .schema("kb").from("kb_documents")
           .select("id")
           .eq("id", doc_id)
           .eq("organization_id", orgId)
@@ -642,7 +642,7 @@ Deno.serve(async (req: Request) => {
         if (!doc) return err("Document not found", 404, cors);
 
         const { data: chunks, error } = await adminClient
-          .from("kb_chunks")
+          .schema("kb").from("kb_chunks")
           .select("id, chunk_code, content, heading")
           .eq("document_id", doc_id)
           .order("chunk_index", { ascending: true });
@@ -658,7 +658,7 @@ Deno.serve(async (req: Request) => {
           return err("Missing title or content", 400, cors);
 
         const { data, error } = await adminClient
-          .from("kb_amend_requests")
+          .schema("kb").from("kb_amend_requests")
           .insert({
             organization_id: orgId,
             requested_by: null,
@@ -676,7 +676,7 @@ Deno.serve(async (req: Request) => {
       // ── List KB amend requests ──────────────────────────────────────────
       case "list_kb_amend_requests": {
         const { data, error } = await adminClient
-          .from("kb_amend_requests")
+          .schema("kb").from("kb_amend_requests")
           .select("id, title, document_id, content, status, reviewer_notes, created_at")
           .eq("organization_id", orgId)
           .order("created_at", { ascending: false });
@@ -688,7 +688,7 @@ Deno.serve(async (req: Request) => {
       // ── List payments for this org ──────────────────────────────────────
       case "list_payments": {
         const { data, error } = await adminClient
-          .from("payment_history")
+          .schema("billing").from("payment_history")
           .select("id, amount, currency, category, description, status, credits_added, created_at, paypal_order_id")
           .eq("organization_id", orgId)
           .order("created_at", { ascending: false });
@@ -703,7 +703,7 @@ Deno.serve(async (req: Request) => {
         if (!payment_id) return err("Missing payment_id", 400, cors);
 
         const { data: payment, error: fetchErr } = await adminClient
-          .from("payment_history")
+          .schema("billing").from("payment_history")
           .select("id, amount, description, category, status")
           .eq("id", payment_id)
           .eq("organization_id", orgId)
@@ -722,7 +722,7 @@ Deno.serve(async (req: Request) => {
         const order = await paypalCreateOrder(payment.amount, payment.description, trace);
 
         await adminClient
-          .from("payment_history")
+          .schema("billing").from("payment_history")
           .update({ paypal_order_id: order.id })
           .eq("id", payment_id)
           .eq("organization_id", orgId);
@@ -736,7 +736,7 @@ Deno.serve(async (req: Request) => {
         if (!payment_id || !order_id) return err("Missing payment_id or order_id", 400, cors);
 
         const { data: payment, error: fetchErr } = await adminClient
-          .from("payment_history")
+          .schema("billing").from("payment_history")
           .select("id, amount, description, category, status, paypal_order_id")
           .eq("id", payment_id)
           .eq("organization_id", orgId)
@@ -758,7 +758,7 @@ Deno.serve(async (req: Request) => {
           paypalLog("customer.capture.not_completed", {
             trace, order_id, paypal_status: capture.status,
           });
-          await adminClient.from("payment_history").update({
+          await adminClient.schema("billing").from("payment_history").update({
             status: "failed",
             paypal_capture_id: capture.captureId,
             payer_email: capture.payerEmail,
@@ -775,28 +775,28 @@ Deno.serve(async (req: Request) => {
           if (!result.ok) return err(result.error!, result.status!, cors);
         } else if (payment.category === "addon") {
           const { data: orgRow, error: orgErr } = await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .select("addon_credits")
             .eq("id", orgId)
             .single();
           if (orgErr) throw orgErr;
           creditsAdded = ADDON_CREDITS;
           await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .update({ addon_credits: (orgRow?.addon_credits ?? 0) + ADDON_CREDITS })
             .eq("id", orgId);
           await adminClient
-            .from("widget_configs")
+            .schema("core").from("widget_configs")
             .update({ enabled: true, disable_reason: null, disable_message: null })
             .eq("organization_id", orgId)
             .eq("disable_reason", "usage_limit");
           await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .update({ limit_exceeded_at: null, limit_notified_at: null })
             .eq("id", orgId);
         }
 
-        await adminClient.from("payment_history").update({
+        await adminClient.schema("billing").from("payment_history").update({
           status: "completed",
           paypal_capture_id: capture.captureId,
           payer_email: capture.payerEmail,
@@ -880,7 +880,7 @@ async function extendSubscription(
   plan?: string
 ): Promise<{ ok: boolean; newEndDate?: string; error?: string; status?: number }> {
   const { data: currentOrg, error: fetchErr } = await adminClient
-    .from("organizations")
+    .schema("core").from("organizations")
     .select("subscription_plan, subscription_end_date")
     .eq("id", orgId)
     .single();
@@ -901,7 +901,7 @@ async function extendSubscription(
     : addCalendarMonths(baseDate, 1);
 
   const { error: updateErr } = await adminClient
-    .from("organizations")
+    .schema("core").from("organizations")
     .update({
       subscription_plan: renewPlan,
       subscription_start_date: now.toISOString(),
@@ -915,7 +915,7 @@ async function extendSubscription(
   if (updateErr) return { ok: false, error: updateErr.message, status: 500 };
 
   await adminClient
-    .from("widget_configs")
+    .schema("core").from("widget_configs")
     .update({ enabled: true, disable_reason: null, disable_message: null })
     .eq("organization_id", orgId)
     .eq("disable_reason", "subscription_expired");

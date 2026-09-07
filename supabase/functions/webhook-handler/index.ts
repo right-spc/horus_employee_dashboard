@@ -91,7 +91,7 @@ async function processInboundReply(
   // 2. Fallback: match by sender email to the most recent sent send for the contact.
   if (!send && fromEmail) {
     const { data: contact } = await supabase
-      .from("contacts")
+      .schema("crm").from("contacts")
       .select("id")
       .ilike("email", fromEmail)
       .maybeSingle();

@@ -31,6 +31,19 @@
   const SALESPERSON_PRESETS = new Set(["setup", "yearly"]);
   const OWNER_PRESETS = new Set(["setup", "monthly", "yearly", "addon", "custom"]);
 
+  // Table → schema lookup for the dynamic delete loops (tables moved out of public 2026-09-07).
+  const TABLE_SCHEMA: Record<string, string> = {
+    organizations: "core", organization_members: "core", dashboard_users: "core", customer_users: "core", widget_configs: "core", demo_defaults: "core",
+    contacts: "crm", contact_aliases: "crm",
+    conversations: "messaging", messages: "messaging", conversation_merges: "messaging", delivery_queue: "messaging", widget_surveys: "messaging",
+    kb_documents: "kb", kb_chunks: "kb", kb_amend_requests: "kb",
+    business_profiles: "business", business_services: "business", business_hours: "business", business_staff: "business",
+    email_providers: "comms", integrations: "comms", notification_recipients: "comms", export_schedules: "comms",
+    payment_history: "billing", credit_cycle_history: "billing",
+    analytics_events: "analytics", analytics_daily: "analytics", analytics_hourly: "analytics", audit_logs: "analytics",
+    rate_limit_buckets: "system",
+  };
+
   // Compute the next run timestamp for an export schedule. Aligned to 00:00 UTC
   // so each scheduled run lines up exactly with the cron-maintenance tick (which
   // fires at 0 0 * * *). Setting any later hour would cause daily schedules to
@@ -110,7 +123,7 @@
 
     // Look up dashboard user record and role
     const { data: dashUser, error: dashError } = await adminClient
-      .from("dashboard_users")
+      .schema("core").from("dashboard_users")
       .select("id, display_name, role, is_active")
       .eq("id", user.id)
       .single<DashboardUser>();
@@ -155,7 +168,7 @@
         // ── List organizations ──────────────────────────────────────────────
         case "list_orgs": {
           let query = adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .select(`
               id, name, slug, subscription_status, subscription_tier,
               subscription_plan, subscription_start_date, subscription_end_date,
@@ -182,10 +195,10 @@
           if (orgIds.length === 0) return ok({ orgs: [], providers: [], widgets: [] });
 
           const [{ data: providers }, { data: widgets }] = await Promise.all([
-            adminClient.from("email_providers")
+            adminClient.schema("comms").from("email_providers")
               .select("organization_id, provider, status, provider_account_email, watch_expiry, emails_sent_today, daily_send_limit")
               .in("organization_id", orgIds),
-            adminClient.from("widget_configs")
+            adminClient.schema("core").from("widget_configs")
               .select("organization_id, enabled, api_key")
               .in("organization_id", orgIds),
           ]);
@@ -207,14 +220,14 @@
             { data: kbDocs },
             { data: lastPayment },
           ] = await Promise.all([
-            adminClient.from("organizations").select("*").eq("id", org_id).single(),
-            adminClient.from("email_providers").select("*").eq("organization_id", org_id),
-            adminClient.from("widget_configs").select("*").eq("organization_id", org_id).maybeSingle(),
-            adminClient.from("kb_documents")
+            adminClient.schema("core").from("organizations").select("*").eq("id", org_id).single(),
+            adminClient.schema("comms").from("email_providers").select("*").eq("organization_id", org_id),
+            adminClient.schema("core").from("widget_configs").select("*").eq("organization_id", org_id).maybeSingle(),
+            adminClient.schema("kb").from("kb_documents")
               .select("id, title, file_type, status, created_at")
               .eq("organization_id", org_id)
               .order("created_at", { ascending: false }),
-            adminClient.from("payment_history")
+            adminClient.schema("billing").from("payment_history")
               .select("created_at, category, amount")
               .eq("organization_id", org_id)
               .eq("status", "completed")
@@ -257,7 +270,7 @@
           const billingDay = Math.min(now.getUTCDate(), 28);
 
           const { data: org, error: orgErr } = await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .insert({
               name, slug,
               ai_tone: ai_tone || "professional",
@@ -280,7 +293,7 @@
           if (orgErr) throw orgErr;
 
           // Auto-create widget config (disabled for salesperson-created orgs)
-          await adminClient.from("widget_configs").insert({
+          await adminClient.schema("core").from("widget_configs").insert({
             organization_id: org.id,
             enabled: false,
             disable_reason: "pending_activation",
@@ -310,7 +323,7 @@
 
             // For demo orgs, salespeople can only edit ai_tone
             const { data: orgCheck } = await adminClient
-              .from("organizations")
+              .schema("core").from("organizations")
               .select("is_demo")
               .eq("id", org_id)
               .single();
@@ -342,7 +355,7 @@
           }
 
           const { error } = await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .update(updates)
             .eq("id", org_id);
 
@@ -364,7 +377,7 @@
           }
 
           const { error } = await adminClient
-            .from("widget_configs")
+            .schema("core").from("widget_configs")
             .update(updates)
             .eq("organization_id", org_id);
 
@@ -434,7 +447,7 @@
           await assertOrgAccess(adminClient, dashUser, org_id as string);
 
           const { error } = await adminClient
-            .from("kb_documents")
+            .schema("kb").from("kb_documents")
             .delete()
             .eq("id", doc_id)
             .eq("organization_id", org_id); // Safety: ensure doc belongs to org
@@ -451,7 +464,7 @@
           await assertOrgAccess(adminClient, dashUser, org_id as string);
 
           const { data, error } = await adminClient
-            .from("kb_chunks")
+            .schema("kb").from("kb_chunks")
             .select("content, chunk_index")
             .eq("document_id", doc_id)
             .order("chunk_index", { ascending: true });
@@ -468,14 +481,14 @@
           if (!org_id) return err("Missing org_id", 400);
 
           const { error: orgErr } = await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .update({ messages_used_this_month: 0, limit_exceeded_at: null, limit_notified_at: null })
             .eq("id", org_id);
 
           if (orgErr) throw orgErr;
 
           await adminClient
-            .from("widget_configs")
+            .schema("core").from("widget_configs")
             .update({ enabled: true, disable_reason: null, disable_message: null })
             .eq("organization_id", org_id)
             .eq("disable_reason", "usage_limit");
@@ -501,7 +514,7 @@
           if (!isOwner) return err("Only owners can view sales reports", 403);
 
           const { data, error } = await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .select("id, name, created_at, created_by, created_by_name, subscription_tier, subscription_plan, subscription_end_date, messages_used_this_month")
             .not("created_by", "is", null)
             .eq("is_demo", false)
@@ -518,7 +531,7 @@
           await assertOrgAccess(adminClient, dashUser, org_id as string);
 
           const { data, error } = await adminClient
-            .from("notification_recipients")
+            .schema("comms").from("notification_recipients")
             .select("id, email, name, notify_on, is_active")
             .eq("organization_id", org_id)
             .order("created_at", { ascending: true });
@@ -534,7 +547,7 @@
           await assertOrgAccess(adminClient, dashUser, org_id as string);
 
           const { data, error } = await adminClient
-            .from("notification_recipients")
+            .schema("comms").from("notification_recipients")
             .insert({
               organization_id: org_id,
               email,
@@ -557,7 +570,7 @@
           await assertOrgAccess(adminClient, dashUser, org_id);
 
           const { error } = await adminClient
-            .from("notification_recipients")
+            .schema("comms").from("notification_recipients")
             .update(updates)
             .eq("id", recipient_id)
             .eq("organization_id", org_id);
@@ -573,7 +586,7 @@
           await assertOrgAccess(adminClient, dashUser, org_id as string);
 
           const { error } = await adminClient
-            .from("notification_recipients")
+            .schema("comms").from("notification_recipients")
             .delete()
             .eq("id", recipient_id)
             .eq("organization_id", org_id as string);
@@ -621,13 +634,13 @@
 
           const [{ data: provider }, { data: recips }] = await Promise.all([
             adminClient
-              .from("email_providers")
+              .schema("comms").from("email_providers")
               .select("provider_account_email")
               .eq("organization_id", org_id)
               .eq("status", "active")
               .maybeSingle(),
             adminClient
-              .from("notification_recipients")
+              .schema("comms").from("notification_recipients")
               .select("id, name, email, notify_on")
               .eq("organization_id", org_id)
               .eq("is_active", true)
@@ -647,7 +660,7 @@
           await assertOrgAccess(adminClient, dashUser, org_id);
 
           const { data, error } = await adminClient
-            .from("export_schedules")
+            .schema("comms").from("export_schedules")
             .select("*")
             .eq("organization_id", org_id)
             .order("created_at", { ascending: false });
@@ -672,7 +685,7 @@
 
           const next_run_at = computeNextRunAt(frequency, new Date()).toISOString();
           const { data, error } = await adminClient
-            .from("export_schedules")
+            .schema("comms").from("export_schedules")
             .insert({
               organization_id: org_id,
               frequency,
@@ -697,7 +710,7 @@
           if (!schedule_id) return err("Missing schedule_id", 400);
 
           const { data: existing, error: fetchErr } = await adminClient
-            .from("export_schedules")
+            .schema("comms").from("export_schedules")
             .select("organization_id, frequency")
             .eq("id", schedule_id)
             .single();
@@ -719,7 +732,7 @@
           }
 
           const { data, error } = await adminClient
-            .from("export_schedules")
+            .schema("comms").from("export_schedules")
             .update(updates)
             .eq("id", schedule_id)
             .select()
@@ -734,7 +747,7 @@
           if (!schedule_id) return err("Missing schedule_id", 400);
 
           const { data: existing, error: fetchErr } = await adminClient
-            .from("export_schedules")
+            .schema("comms").from("export_schedules")
             .select("organization_id")
             .eq("id", schedule_id)
             .single();
@@ -743,7 +756,7 @@
           await assertOrgAccess(adminClient, dashUser, existing.organization_id);
 
           const { error } = await adminClient
-            .from("export_schedules")
+            .schema("comms").from("export_schedules")
             .delete()
             .eq("id", schedule_id);
           if (error) throw error;
@@ -755,21 +768,21 @@
           if (!isOwner) return err("Only owners can use the emergency kill switch", 403);
 
           const { error: wErr } = await adminClient
-            .from("widget_configs")
+            .schema("core").from("widget_configs")
             .update({ enabled: false, disable_reason: "emergency", disable_message: "Service temporarily suspended." })
             .eq("enabled", true);
 
           if (wErr) throw wErr;
 
           const { error: aiErr } = await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .update({ ai_responses_enabled: false })
             .eq("ai_responses_enabled", true);
 
           if (aiErr) throw aiErr;
 
           const { error: asErr } = await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .update({ auto_send_enabled: false })
             .eq("auto_send_enabled", true);
 
@@ -783,14 +796,14 @@
           if (!isOwner) return err("Only owners can restore from emergency", 403);
 
           const { error: wErr } = await adminClient
-            .from("widget_configs")
+            .schema("core").from("widget_configs")
             .update({ enabled: true, disable_reason: null, disable_message: null })
             .eq("disable_reason", "emergency");
 
           if (wErr) throw wErr;
 
           const { error: aiErr } = await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .update({ ai_responses_enabled: true, auto_send_enabled: true })
             .eq("ai_responses_enabled", false);
 
@@ -802,7 +815,7 @@
         // ── List demo organizations ────────────────────────────────────────
         case "list_demos": {
           const { data, error } = await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .select(`
               id, name, slug, subscription_tier,
               messages_used_this_month, message_limit_per_month,
@@ -817,7 +830,7 @@
           if (orgIds.length === 0) return ok({ demos: [], widgets: [] });
 
           const { data: widgets } = await adminClient
-            .from("widget_configs")
+            .schema("core").from("widget_configs")
             .select("organization_id, enabled, api_key")
             .in("organization_id", orgIds);
 
@@ -835,7 +848,7 @@
           const demoBillingDay = Math.min(new Date().getUTCDate(), 28);
 
           const { data: org, error: orgErr } = await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .insert({
               name, slug,
               ai_tone: ai_tone || "professional",
@@ -856,13 +869,13 @@
           if (orgErr) throw orgErr;
 
           // Auto-create widget config (enabled for demos)
-          await adminClient.from("widget_configs").insert({
+          await adminClient.schema("core").from("widget_configs").insert({
             organization_id: org.id,
             enabled: true,
           });
 
           // Create initial demo_defaults snapshot
-          await adminClient.from("demo_defaults").insert({
+          await adminClient.schema("core").from("demo_defaults").insert({
             organization_id: org.id,
             name: org.name,
             slug: org.slug,
@@ -889,7 +902,7 @@
 
           // Verify it's a demo org
           const { data: org } = await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .select("is_demo")
             .eq("id", org_id)
             .single();
@@ -898,7 +911,7 @@
 
           // Fetch defaults
           const { data: defaults, error: defErr } = await adminClient
-            .from("demo_defaults")
+            .schema("core").from("demo_defaults")
             .select("*")
             .eq("organization_id", org_id)
             .single();
@@ -907,7 +920,7 @@
 
           // 1. Reset organization settings
           const { error: orgErr } = await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .update({
               name: defaults.name,
               slug: defaults.slug,
@@ -929,15 +942,15 @@
           // 2. Reset widget config
           if (defaults.widget_defaults) {
             const { error: wErr } = await adminClient
-              .from("widget_configs")
+              .schema("core").from("widget_configs")
               .update(defaults.widget_defaults)
               .eq("organization_id", org_id);
             if (wErr) throw wErr;
           }
 
           // 3. Reset KB: delete existing, re-ingest from defaults
-          await adminClient.from("kb_chunks").delete().eq("organization_id", org_id);
-          await adminClient.from("kb_documents").delete().eq("organization_id", org_id);
+          await adminClient.schema("kb").from("kb_chunks").delete().eq("organization_id", org_id);
+          await adminClient.schema("kb").from("kb_documents").delete().eq("organization_id", org_id);
 
           const kbDefaults = (defaults.kb_defaults as Array<{ title: string; format: string; content: unknown }>) || [];
           for (const doc of kbDefaults) {
@@ -973,7 +986,7 @@
 
           // Fetch current org state
           const { data: org } = await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .select("*")
             .eq("id", org_id)
             .single();
@@ -982,21 +995,21 @@
 
           // Fetch current widget config
           const { data: widget } = await adminClient
-            .from("widget_configs")
+            .schema("core").from("widget_configs")
             .select("*")
             .eq("organization_id", org_id)
             .maybeSingle();
 
           // Fetch current KB docs + chunks
           const { data: kbDocs } = await adminClient
-            .from("kb_documents")
+            .schema("kb").from("kb_documents")
             .select("id, title, file_type")
             .eq("organization_id", org_id);
 
           const kbDefaults: Array<{ title: string; format: string; content: unknown }> = [];
           for (const doc of (kbDocs || [])) {
             const { data: chunks } = await adminClient
-              .from("kb_chunks")
+              .schema("kb").from("kb_chunks")
               .select("content, chunk_index")
               .eq("document_id", doc.id)
               .order("chunk_index", { ascending: true });
@@ -1024,7 +1037,7 @@
 
           // Upsert into demo_defaults
           const { error } = await adminClient
-            .from("demo_defaults")
+            .schema("core").from("demo_defaults")
             .upsert({
               organization_id: org_id,
               name: org.name,
@@ -1054,7 +1067,7 @@
 
           // Verify it's actually a demo before doing anything destructive
           const { data: org, error: lookupErr } = await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .select("id, is_demo")
             .eq("id", org_id)
             .single();
@@ -1099,6 +1112,7 @@
           ];
           for (const t of childTables) {
             const { error: childErr } = await adminClient
+              .schema(TABLE_SCHEMA[t])
               .from(t)
               .delete()
               .eq("organization_id", org_id as string);
@@ -1107,7 +1121,7 @@
 
           // Final delete with belt-and-braces is_demo guard
           const { error: delErr } = await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .delete()
             .eq("id", org_id as string)
             .eq("is_demo", true);
@@ -1127,7 +1141,7 @@
           // Look up the org and verify slug matches — prevents accidental
           // deletion by an operator who clicked the wrong row.
           const { data: org, error: lookupErr } = await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .select("id, slug, is_demo")
             .eq("id", org_id)
             .single();
@@ -1173,6 +1187,7 @@
           ];
           for (const t of childTables) {
             const { error: childErr } = await adminClient
+              .schema(TABLE_SCHEMA[t])
               .from(t)
               .delete()
               .eq("organization_id", org_id as string);
@@ -1182,7 +1197,7 @@
           // Final delete with is_demo=false guard so this action can never
           // bypass the delete_demo safety path.
           const { error: delErr } = await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .delete()
             .eq("id", org_id as string)
             .eq("is_demo", false);
@@ -1210,7 +1225,7 @@
           // Read the demo's LIVE state rather than the demo_defaults snapshot,
           // so templates always reflect the demo as it currently exists.
           const { data: demoOrg, error: demoOrgErr } = await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .select("is_demo, ai_system_prompt, ai_tone")
             .eq("id", demo_org_id)
             .single();
@@ -1221,7 +1236,7 @@
           // Copy system prompt
           if (copy_prompt && demoOrg.ai_system_prompt) {
             await adminClient
-              .from("organizations")
+              .schema("core").from("organizations")
               .update({ ai_system_prompt: demoOrg.ai_system_prompt })
               .eq("id", target_org_id);
           }
@@ -1229,7 +1244,7 @@
           // Copy AI tone
           if (copy_tone && demoOrg.ai_tone) {
             await adminClient
-              .from("organizations")
+              .schema("core").from("organizations")
               .update({ ai_tone: demoOrg.ai_tone })
               .eq("id", target_org_id);
           }
@@ -1237,7 +1252,7 @@
           // Copy widget settings (colors, appearance — not api_key, enabled status)
           if (copy_widget) {
             const { data: demoWidget } = await adminClient
-              .from("widget_configs")
+              .schema("core").from("widget_configs")
               .select("*")
               .eq("organization_id", demo_org_id)
               .maybeSingle();
@@ -1255,7 +1270,7 @@
                 ...safeWidgetUpdates
               } = demoWidget;
               await adminClient
-                .from("widget_configs")
+                .schema("core").from("widget_configs")
                 .update(safeWidgetUpdates)
                 .eq("organization_id", target_org_id);
             }
@@ -1265,13 +1280,13 @@
           // Rebuild each doc from its live kb_chunks in the same shape kb-ingest expects.
           if (copy_kb) {
             const { data: kbDocs } = await adminClient
-              .from("kb_documents")
+              .schema("kb").from("kb_documents")
               .select("id, title, file_type")
               .eq("organization_id", demo_org_id);
 
             for (const doc of (kbDocs || [])) {
               const { data: chunks } = await adminClient
-                .from("kb_chunks")
+                .schema("kb").from("kb_chunks")
                 .select("content, chunk_index")
                 .eq("document_id", doc.id)
                 .order("chunk_index", { ascending: true });
@@ -1359,7 +1374,7 @@
             paypalLog("capture.not_completed", {
               trace, order_id, paypal_status: capture.status,
             });
-            await adminClient.from("payment_history").insert({
+            await adminClient.schema("billing").from("payment_history").insert({
               organization_id: org_id,
               amount: Number(amount),
               description,
@@ -1382,30 +1397,30 @@
             if (!result.ok) return err(result.error!, result.status!);
           } else if (category === "addon") {
             const { data: orgRow, error: orgErr } = await adminClient
-              .from("organizations")
+              .schema("core").from("organizations")
               .select("addon_credits")
               .eq("id", org_id)
               .single();
             if (orgErr) throw orgErr;
             creditsAdded = ADDON_CREDITS;
             await adminClient
-              .from("organizations")
+              .schema("core").from("organizations")
               .update({ addon_credits: (orgRow?.addon_credits ?? 0) + ADDON_CREDITS })
               .eq("id", org_id);
             // Re-enable widget if it was disabled due to usage limit — addon credits restore service
             await adminClient
-              .from("widget_configs")
+              .schema("core").from("widget_configs")
               .update({ enabled: true, disable_reason: null, disable_message: null })
               .eq("organization_id", org_id)
               .eq("disable_reason", "usage_limit");
             await adminClient
-              .from("organizations")
+              .schema("core").from("organizations")
               .update({ limit_exceeded_at: null, limit_notified_at: null })
               .eq("id", org_id);
           }
 
           const { data: row, error: insErr } = await adminClient
-            .from("payment_history")
+            .schema("billing").from("payment_history")
             .insert({
               organization_id: org_id,
               amount: Number(amount),
@@ -1430,7 +1445,7 @@
           // ── Send payment confirmation email ───────────────────────────────
           try {
             const { data: orgForEmail } = await adminClient
-              .from("organizations")
+              .schema("core").from("organizations")
               .select("name, subscription_end_date")
               .eq("id", org_id)
               .single();
@@ -1516,7 +1531,7 @@
           }
 
           const { data: row, error: insErr } = await adminClient
-            .from("payment_history")
+            .schema("billing").from("payment_history")
             .insert({
               organization_id: org_id,
               amount: Number(amount),
@@ -1555,7 +1570,7 @@
           }
 
           const { data: row, error: insErr } = await adminClient
-            .from("payment_history")
+            .schema("billing").from("payment_history")
             .insert({
               organization_id: org_id,
               amount: Number(amount),
@@ -1583,7 +1598,7 @@
           await assertOrgAccess(adminClient, dashUser, org_id);
 
           const { data: orgRow } = await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .select("name")
             .eq("id", org_id)
             .single();
@@ -1623,7 +1638,7 @@
           await assertOrgAccess(adminClient, dashUser, org_id as string);
 
           const { data, error } = await adminClient
-            .from("payment_history")
+            .schema("billing").from("payment_history")
             .select("*")
             .eq("organization_id", org_id)
             .order("created_at", { ascending: false });
@@ -1640,7 +1655,7 @@
           if (!org_id || !payment_id) return err("Missing org_id or payment_id", 400);
 
           const { error } = await adminClient
-            .from("payment_history")
+            .schema("billing").from("payment_history")
             .delete()
             .eq("id", payment_id)
             .eq("organization_id", org_id);
@@ -1667,7 +1682,7 @@
           }
 
           const { error } = await adminClient
-            .from("payment_history")
+            .schema("billing").from("payment_history")
             .update(editable)
             .eq("id", payment_id)
             .eq("organization_id", org_id);
@@ -1696,7 +1711,7 @@
 
     // Check if this is a demo org — demos are always accessible to all roles
     const { data: orgCheck } = await adminClient
-      .from("organizations")
+      .schema("core").from("organizations")
       .select("id, is_demo")
       .eq("id", orgId)
       .single();
@@ -1711,7 +1726,7 @@
     const todayStartLocal = getTodayStartUS();
 
     const { data, error } = await adminClient
-      .from("organizations")
+      .schema("core").from("organizations")
       .select("id")
       .eq("id", orgId)
       .eq("created_by", dashUser.id)
@@ -1770,7 +1785,7 @@
     plan?: string
   ): Promise<{ ok: boolean; newEndDate?: string; error?: string; status?: number }> {
     const { data: currentOrg, error: fetchErr } = await adminClient
-      .from("organizations")
+      .schema("core").from("organizations")
       .select("subscription_plan, subscription_end_date, billing_day_of_month")
       .eq("id", orgId)
       .single();
@@ -1792,7 +1807,7 @@
       : addCalendarMonths(baseDate, 1);
 
     const { error: updateErr } = await adminClient
-      .from("organizations")
+      .schema("core").from("organizations")
       .update({
         subscription_plan: renewPlan,
         subscription_start_date: now.toISOString(),
@@ -1830,7 +1845,7 @@
 
         if (now <= billingDeadline) {
           await adminClient
-            .from("organizations")
+            .schema("core").from("organizations")
             .update({ rollover_eligible: true })
             .eq("id", orgId);
         }
@@ -1838,7 +1853,7 @@
     }
 
     await adminClient
-      .from("widget_configs")
+      .schema("core").from("widget_configs")
       .update({ enabled: true, disable_reason: null, disable_message: null })
       .eq("organization_id", orgId)
       .eq("disable_reason", "subscription_expired");
@@ -1998,7 +2013,7 @@
     body: string
   ): Promise<string[]> {
     const { data: provider } = await supabase
-      .from("email_providers")
+      .schema("comms").from("email_providers")
       .select("id, provider, provider_account_email, access_token_encrypted, refresh_token_encrypted, token_expires_at")
       .eq("organization_id", organizationId)
       .eq("status", "active")
@@ -2010,7 +2025,7 @@
     }
 
     const { data: recipients } = await supabase
-      .from("notification_recipients")
+      .schema("comms").from("notification_recipients")
       .select("email, name")
       .eq("organization_id", organizationId)
       .eq("is_active", true)

@@ -145,8 +145,8 @@ Deno.serve(async (req: Request) => {
 
     // Upsert into integrations table
     const { data: existing } = await supabase
+      .schema("comms")
       .from("integrations")
-      .select("id")
       .eq("organization_id", org_id)
       .eq("integration_type", "calendly")
       .maybeSingle();
@@ -172,12 +172,14 @@ Deno.serve(async (req: Request) => {
     let dbError;
     if (existing) {
       const { error } = await supabase
+        .schema("comms")
         .from("integrations")
         .update(integrationData)
         .eq("id", existing.id);
       dbError = error;
     } else {
       const { error } = await supabase
+        .schema("comms")
         .from("integrations")
         .insert(integrationData);
       dbError = error;

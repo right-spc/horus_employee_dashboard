@@ -123,7 +123,7 @@ Deno.serve(async (req: Request) => {
     // Atomic claim: set status to 'processing' so concurrent invocations
     // don't pick up the same jobs. Uses processing_started_at for stale detection.
     const { data: jobs, error: claimError } = await supabase
-      .from("delivery_queue")
+      .schema("messaging").from("delivery_queue")
       .update({
         status: "processing",
         processing_started_at: new Date().toISOString(),
@@ -149,7 +149,7 @@ Deno.serve(async (req: Request) => {
       try {
         // Load the message
         const { data: message, error: msgError } = await supabase
-          .from("messages")
+          .schema("messaging").from("messages")
           .select("id, content, conversation_id, external_message_id")
           .eq("id", job.message_id)
           .single<MessageRow>();
@@ -162,7 +162,7 @@ Deno.serve(async (req: Request) => {
 
         // Load the conversation (for thread ID + recipient email)
         const { data: conversation, error: convError } = await supabase
-          .from("conversations")
+          .schema("messaging").from("conversations")
           .select("id, external_thread_id, customer_email, subject")
           .eq("id", message.conversation_id)
           .single<ConversationRow>();
@@ -195,7 +195,7 @@ Deno.serve(async (req: Request) => {
 
         // ── 5. MARK SUCCESS ────────────────────
         await supabase
-          .from("delivery_queue")
+          .schema("messaging").from("delivery_queue")
           .update({
             status: "sent",
             provider_message_id: providerMessageId,
@@ -205,7 +205,7 @@ Deno.serve(async (req: Request) => {
           .eq("id", job.id);
 
         await supabase
-          .from("messages")
+          .schema("messaging").from("messages")
           .update({
             status: "sent",
             sent_at: new Date().toISOString(),
@@ -214,7 +214,7 @@ Deno.serve(async (req: Request) => {
           .eq("id", job.message_id);
 
         // Analytics
-        await supabase.from("analytics_events").insert({
+        await supabase.schema("analytics").from("analytics_events").insert({
           organization_id: job.organization_id,
           event_type: "message_sent",
           metadata: {
@@ -315,7 +315,7 @@ async function sendViaGmail(
 
   // Increment daily send counter
   await supabase
-    .from("email_providers")
+    .schema("comms").from("email_providers")
     .update({ emails_sent_today: provider.emails_sent_today + 1 })
     .eq("id", provider.id);
 
@@ -408,7 +408,7 @@ async function sendViaMicrosoft(
   // There is no provider message ID returned — use a synthetic one.
   // Increment daily send counter
   await supabase
-    .from("email_providers")
+    .schema("comms").from("email_providers")
     .update({ emails_sent_today: provider.emails_sent_today + 1 })
     .eq("id", provider.id);
 
@@ -468,7 +468,7 @@ async function getMicrosoftAccessToken(
   if (!tokenResponse.ok) {
     const err = await tokenResponse.text();
     await supabase
-      .from("email_providers")
+      .schema("comms").from("email_providers")
       .update({ status: "expired", error_message: `Token refresh failed: ${err}` })
       .eq("id", provider.id);
     throw new Error(`Microsoft token refresh failed: ${err}`);
@@ -478,7 +478,7 @@ async function getMicrosoftAccessToken(
   const newExpiry = new Date(now.getTime() + tokens.expires_in * 1000);
 
   await supabase
-    .from("email_providers")
+    .schema("comms").from("email_providers")
     .update({
       access_token_encrypted: await encrypt(tokens.access_token, encryptionKey),
       token_expires_at: newExpiry.toISOString(),
@@ -532,7 +532,7 @@ async function getGmailAccessToken(
     const err = await tokenResponse.text();
     // Mark provider as expired so the org knows to re-authenticate
     await supabase
-      .from("email_providers")
+      .schema("comms").from("email_providers")
       .update({ status: "expired", error_message: `Token refresh failed: ${err}` })
       .eq("id", provider.id);
     throw new Error(`Token refresh failed: ${err}`);
@@ -543,7 +543,7 @@ async function getGmailAccessToken(
 
   // Store refreshed token
   await supabase
-    .from("email_providers")
+    .schema("comms").from("email_providers")
     .update({
       access_token_encrypted: await encrypt(tokens.access_token, encryptionKey),
       token_expires_at: newExpiry.toISOString(),
@@ -562,7 +562,7 @@ async function loadProvider(
   providerType: "google" | "microsoft"
 ): Promise<ProviderRow> {
   const { data, error } = await supabase
-    .from("email_providers")
+    .schema("comms").from("email_providers")
     .select(
       "id, provider, provider_account_email, access_token_encrypted, " +
       "refresh_token_encrypted, token_expires_at, daily_send_limit, emails_sent_today"
@@ -631,7 +631,7 @@ async function failJob(
   console.error(`Job ${job.id} permanently failed: ${reason}`);
 
   await supabase
-    .from("delivery_queue")
+    .schema("messaging").from("delivery_queue")
     .update({
       status: "failed",
       error_message: reason,
@@ -641,11 +641,11 @@ async function failJob(
     .eq("id", job.id);
 
   await supabase
-    .from("messages")
+    .schema("messaging").from("messages")
     .update({ status: "sending_failed" })
     .eq("id", job.message_id);
 
-  await supabase.from("analytics_events").insert({
+  await supabase.schema("analytics").from("analytics_events").insert({
     organization_id: job.organization_id,
     event_type: "delivery_failed",
     metadata: {
@@ -681,7 +681,7 @@ async function retryOrFail(
   );
 
   await supabase
-    .from("delivery_queue")
+    .schema("messaging").from("delivery_queue")
     .update({
       status: "pending",
       attempt_count: newAttemptCount,
@@ -692,7 +692,7 @@ async function retryOrFail(
     })
     .eq("id", job.id);
 
-  await supabase.from("analytics_events").insert({
+  await supabase.schema("analytics").from("analytics_events").insert({
     organization_id: job.organization_id,
     event_type: "delivery_failed",
     metadata: {
@@ -730,7 +730,7 @@ async function processEscalationNotifications(
   try {
     // Find webchat conversations with due escalation notifications
     const { data: conversations, error } = await supabase
-      .from("conversations")
+      .schema("messaging").from("conversations")
       .select("id, organization_id, customer_email, subject, escalation_type, lead_priority")
       .not("escalation_notify_at", "is", null)
       .lte("escalation_notify_at", new Date().toISOString())
@@ -745,7 +745,7 @@ async function processEscalationNotifications(
       try {
         // Fetch full chat history at this moment (not at escalation time)
         const { data: messages } = await supabase
-          .from("messages")
+          .schema("messaging").from("messages")
           .select("role, content, created_at")
           .eq("conversation_id", convo.id)
           .order("created_at", { ascending: true });
@@ -776,7 +776,7 @@ async function processEscalationNotifications(
 
         // Clear the flag so we don't send again
         await supabase
-          .from("conversations")
+          .schema("messaging").from("conversations")
           .update({ escalation_notify_at: null })
           .eq("id", convo.id);
 
@@ -888,7 +888,7 @@ async function sendOrgNotification(
   escalationSubType?: "frustrated" | "kb_gap" | "lead"
 ): Promise<void> {
   const { data: provider } = await supabase
-    .from("email_providers")
+    .schema("comms").from("email_providers")
     .select("id, provider, provider_account_email, access_token_encrypted, refresh_token_encrypted, token_expires_at")
     .eq("organization_id", organizationId)
     .eq("status", "active")
@@ -900,7 +900,7 @@ async function sendOrgNotification(
   }
 
   let recipientQuery = supabase
-    .from("notification_recipients")
+    .schema("comms").from("notification_recipients")
     .select("email, name")
     .eq("organization_id", organizationId)
     .eq("is_active", true);

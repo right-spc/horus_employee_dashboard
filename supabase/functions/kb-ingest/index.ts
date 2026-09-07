@@ -108,7 +108,7 @@ Deno.serve(async (req: Request) => {
 
   // ── Verify org exists ─────────────────────
   const { data: org, error: orgError } = await supabase
-    .from("organizations")
+    .schema("core").from("organizations")
     .select("id")
     .eq("id", body.organization_id)
     .single();
@@ -143,7 +143,7 @@ Deno.serve(async (req: Request) => {
   if (body.id) {
     // Update existing document
     const { data: existing, error: fetchError } = await supabase
-      .from("kb_documents")
+      .schema("kb").from("kb_documents")
       .select("id")
       .eq("id", body.id)
       .eq("organization_id", body.organization_id)
@@ -154,7 +154,7 @@ Deno.serve(async (req: Request) => {
     }
 
     const { error: updateError } = await supabase
-      .from("kb_documents")
+      .schema("kb").from("kb_documents")
       .update({
         title: body.title.trim(),
         description: body.description?.trim() ?? null,
@@ -173,7 +173,7 @@ Deno.serve(async (req: Request) => {
 
     // Delete all existing chunks — they will be replaced below
     const { error: deleteError } = await supabase
-      .from("kb_chunks")
+      .schema("kb").from("kb_chunks")
       .delete()
       .eq("document_id", documentId);
 
@@ -183,7 +183,7 @@ Deno.serve(async (req: Request) => {
   } else {
     // Insert new document
     const { data: newDoc, error: insertError } = await supabase
-      .from("kb_documents")
+      .schema("kb").from("kb_documents")
       .insert({
         organization_id: body.organization_id,
         title: body.title.trim(),
@@ -217,13 +217,13 @@ Deno.serve(async (req: Request) => {
   }));
 
   const { error: chunksError } = await supabase
-    .from("kb_chunks")
+    .schema("kb").from("kb_chunks")
     .insert(chunkRows);
 
   if (chunksError) {
     // Mark document as errored
     await supabase
-      .from("kb_documents")
+      .schema("kb").from("kb_documents")
       .update({ status: "error", error_message: chunksError.message })
       .eq("id", documentId);
     return errorResponse(`Failed to insert chunks: ${chunksError.message}`, 500);
@@ -231,7 +231,7 @@ Deno.serve(async (req: Request) => {
 
   // ── Mark document as ready ────────────────
   await supabase
-    .from("kb_documents")
+    .schema("kb").from("kb_documents")
     .update({ status: "ready" })
     .eq("id", documentId);
 

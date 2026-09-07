@@ -123,3 +123,13 @@ ALTER ROLE authenticator SET pgrst.db_schemas = 'public,storage,graphql_public,w
 NOTIFY pgrst, 'reload schema';
 
 COMMIT;
+
+-- -- Follow-up steps executed same day --
+-- 1. Bridge view for PostgREST cross-schema embeds (customer-api: conversations + contact:contacts(name)):
+--    CREATE VIEW messaging.contacts WITH (security_invoker = true) AS SELECT * FROM crm.contacts;
+-- 2. search_path set on 8 DB functions (increment_message_usage, is_usage_exceeded, increment_rate_limit_bucket,
+--    recover_stale_delivery_jobs, reset_monthly_usage, reset_monthly_usage_for_day, update_conversation_timestamp,
+--    validate_message_state_transition): SET search_path = public, core, crm, messaging, kb, business, comms, billing, analytics, system
+-- 3. All 16 table-touching edge functions schema-qualified (.schema('x').from('y')) and redeployed
+-- 4. Compat views dropped: DROP VIEW public.<all 31>; public schema now empty (0 tables, 0 views)
+-- NOTE: messaging.contacts bridge view is PERMANENT infrastructure (not a compat view) — do not drop.

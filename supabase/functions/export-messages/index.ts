@@ -72,7 +72,7 @@ Deno.serve(async (req: Request) => {
 
   // ── 1. Query messages ─────────────────────────────────────────────────────
   const { data: messages, error: msgErr } = await supabase
-    .from("messages")
+    .schema("messaging").from("messages")
     .select(`
       created_at, role, content, status, routing_code,
       escalation_type, lead_priority,
@@ -259,7 +259,7 @@ async function isAuthorizedRecipient(
   const target = email.trim().toLowerCase();
 
   const { data: provider } = await supabase
-    .from("email_providers")
+    .schema("comms").from("email_providers")
     .select("provider_account_email")
     .eq("organization_id", orgId)
     .eq("status", "active")
@@ -268,7 +268,7 @@ async function isAuthorizedRecipient(
   if (provider?.provider_account_email?.toLowerCase() === target) return true;
 
   const { data: recip } = await supabase
-    .from("notification_recipients")
+    .schema("comms").from("notification_recipients")
     .select("id")
     .eq("organization_id", orgId)
     .eq("is_active", true)
@@ -295,7 +295,7 @@ async function sendDownloadLinkEmail(
   ctx: EmailContext
 ): Promise<void> {
   const { data: provider } = await supabase
-    .from("email_providers")
+    .schema("comms").from("email_providers")
     .select("id, provider, provider_account_email, access_token_encrypted, refresh_token_encrypted, token_expires_at")
     .eq("organization_id", orgId)
     .eq("status", "active")
@@ -475,7 +475,7 @@ async function getAccessToken(
   if (!tokenResponse.ok) {
     const err = await tokenResponse.text();
     await supabase
-      .from("email_providers")
+      .schema("comms").from("email_providers")
       .update({ status: "expired", error_message: `Token refresh failed: ${err}` })
       .eq("id", provider.id);
     throw new Error(`Token refresh failed: ${err}`);
@@ -486,7 +486,7 @@ async function getAccessToken(
   const encryptedNewAccess = await encrypt(tokens.access_token, encryptionKey);
 
   await supabase
-    .from("email_providers")
+    .schema("comms").from("email_providers")
     .update({
       access_token_encrypted: encryptedNewAccess,
       token_expires_at: newExpiry.toISOString(),

@@ -194,8 +194,8 @@ Deno.serve(async (req: Request) => {
 
     // ── Upsert email_providers record ─────────
     const { data: existing, error: fetchError } = await supabase
+      .schema("comms")
       .from("email_providers")
-      .select("id")
       .eq("organization_id", org_id)
       .eq("provider", "microsoft")
       .maybeSingle();
@@ -211,6 +211,7 @@ Deno.serve(async (req: Request) => {
     if (existing) {
       console.log("Updating existing record...");
       const { error } = await supabase
+        .schema("comms")
         .from("email_providers")
         .update({
           status: "active",
@@ -231,6 +232,7 @@ Deno.serve(async (req: Request) => {
     } else {
       console.log("Inserting new record...");
       const { error } = await supabase
+        .schema("comms")
         .from("email_providers")
         .insert({
           organization_id: org_id,

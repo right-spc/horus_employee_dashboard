@@ -146,13 +146,14 @@ function toast(msg, type = "default") {
 let currentView = "orgs";
 let currentOrgId = null;
 let currentOrgName = "";
+const _nameCache = {}; // org/demo id → display name (avoids embedding names in inline handlers)
 let currentTab = "overview";
 let currentIsDemo = false;
 
 function navigate(view, orgId = null, orgName = "", isDemo = false) {
   currentView = view;
   currentOrgId = orgId;
-  currentOrgName = orgName;
+  currentOrgName = orgName || (orgId ? _nameCache[orgId] || "" : "");
   currentIsDemo = isDemo;
   currentTab = "overview";
   document.querySelectorAll(".nav-item[data-view]").forEach(el => {
@@ -251,10 +252,11 @@ async function renderOrgList(main) {
         ? `<div class="text-xs text-subtle">${escHtml(org.created_by_name)}</div>` : "";
 
       const searchKey = `${org.name} ${org.slug}`.toLowerCase();
+      _nameCache[org.id] = org.name;
       return `
         <tr data-search="${escHtml(searchKey)}">
           <td>
-            <a onclick="navigate('org-detail','${org.id}','${escHtml(org.name)}')"
+            <a onclick="navigate('org-detail','${org.id}')"
                class="org-link">
               ${escHtml(org.name)}
             </a>
@@ -291,7 +293,7 @@ async function renderOrgList(main) {
       </div>`;
   } catch (e) {
     main.querySelector(".card").innerHTML =
-      `<div class="card-body"><div class="alert alert-danger">${e.message}</div></div>`;
+      `<div class="card-body"><div class="alert alert-danger">${escHtml(e.message)}</div></div>`;
   }
 }
 
@@ -399,11 +401,11 @@ async function createOrg() {
     }
 
     const { org } = await api("create_org", params);
-    document.querySelector(".modal-backdrop").remove();
+    document.querySelector(".modal-backdrop")?.remove();
     toast(`Organization "${name}" created`, "success");
     navigate("org-detail", org.id, org.name);
   } catch (e) {
-    errEl.innerHTML = `<div class="alert alert-danger">${e.message}</div>`;
+    errEl.innerHTML = `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
     btn.disabled = false;
     btn.innerHTML = "Create Organization";
   }
@@ -493,10 +495,10 @@ async function createDemo() {
       message_limit_per_month: parseInt(document.getElementById("demo-limit").value),
       auto_send_min_confidence: parseFloat(document.getElementById("demo-confidence").value),
     });
-    document.querySelector(".modal-backdrop").remove();
+    document.querySelector(".modal-backdrop")?.remove();
     navigate("demo-detail", org.id, org.name, true);
   } catch (e) {
-    errEl.innerHTML = `<div class="alert alert-danger">${e.message}</div>`;
+    errEl.innerHTML = `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
     btn.disabled = false;
     btn.textContent = "Create Demo";
   }
@@ -546,7 +548,7 @@ async function renderOrgDetail(main) {
 
     renderTab();
   } catch (e) {
-    main.innerHTML += `<div class="alert alert-danger">${e.message}</div>`;
+    main.innerHTML += `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
   }
 }
 
@@ -581,10 +583,11 @@ async function renderDemoList(main) {
     const rows = demos.map(demo => {
       const widget = widgetMap[demo.id];
       const searchKey = `${demo.name} ${demo.slug}`.toLowerCase();
+      _nameCache[demo.id] = demo.name;
       return `
         <tr data-search="${escHtml(searchKey)}">
           <td>
-            <a onclick="navigate('demo-detail','${demo.id}','${escHtml(demo.name)}',true)"
+            <a onclick="navigate('demo-detail','${demo.id}','',true)"
                class="org-link">
               ${escHtml(demo.name)}
             </a>
@@ -610,7 +613,7 @@ async function renderDemoList(main) {
       </div>`;
   } catch (e) {
     main.querySelector(".card").innerHTML =
-      `<div class="card-body"><div class="alert alert-danger">${e.message}</div></div>`;
+      `<div class="card-body"><div class="alert alert-danger">${escHtml(e.message)}</div></div>`;
   }
 }
 
@@ -658,7 +661,7 @@ async function renderDemoDetail(main) {
 
     renderTab();
   } catch (e) {
-    main.innerHTML += `<div class="alert alert-danger">${e.message}</div>`;
+    main.innerHTML += `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
   }
 }
 
@@ -776,7 +779,7 @@ async function showUseTemplateModal(mode) {
     modal.querySelector(".modal").appendChild(footer);
   } catch (e) {
     modal.querySelector(".modal-body").innerHTML =
-      `<div class="alert alert-danger">${e.message}</div>`;
+      `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
   }
 }
 
@@ -802,7 +805,7 @@ async function applyTemplate(mode) {
       copy_tone: true,
     });
 
-    document.querySelector(".modal-backdrop").remove();
+    document.querySelector(".modal-backdrop")?.remove();
     toast(`Template applied (${mode === "kb" ? "KB documents" : "system prompt"}, widget colors, AI tone)`, "success");
 
     // Refresh org data and re-render current tab
@@ -811,7 +814,7 @@ async function applyTemplate(mode) {
     renderTab();
   } catch (e) {
     document.getElementById("template-error").innerHTML =
-      `<div class="alert alert-danger">${e.message}</div>`;
+      `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
     btn.disabled = false;
     btn.textContent = "Apply Template";
   }
@@ -842,7 +845,7 @@ async function renderTab() {
     else if (currentTab === "settings") renderSettingsTab(el, org);
   } catch (e) {
     console.error("renderTab error:", e);
-    el.innerHTML = `<div class="alert alert-danger">Error rendering tab: ${e.message}</div>`;
+    el.innerHTML = `<div class="alert alert-danger">Error rendering tab: ${escHtml(e.message)}</div>`;
   }
 }
 
@@ -1047,8 +1050,17 @@ async function connectEmail(provider) {
   }
 }
 
-function copyAuthLink() { navigator.clipboard.writeText(window._authLink); toast("Copied", "success"); }
-function openAuthLink() { window.open(window._authLink, "_blank"); }
+function copyAuthLink() {
+  if (window._authLink) {
+    navigator.clipboard.writeText(window._authLink);
+    toast("Copied", "success");
+  }
+}
+function openAuthLink() {
+  if (window._authLink) {
+    window.open(window._authLink, "_blank");
+  }
+}
 
 // ── Notifications Tab (demos only) ───────────────────────────────────────────
 
@@ -1361,8 +1373,8 @@ function renderKbTab(el, kbDocs, org) {
           <td><span class="badge ${doc.status==="ready"?"badge-green":doc.status==="error"?"badge-red":"badge-yellow"}">${doc.status}</span></td>
           <td>${new Date(doc.created_at).toLocaleDateString()}</td>
           <td class="table-actions">
-            <button class="btn btn-ghost btn-sm" onclick="showEditKbModal('${doc.id}','${escHtml(doc.title)}','${doc.file_type}')">Edit</button>
-            <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="deleteKbDoc('${doc.id}','${escHtml(doc.title)}')">Delete</button>
+            <button class="btn btn-ghost btn-sm" onclick="showEditKbModal('${doc.id}')">Edit</button>
+            <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="deleteKbDoc('${doc.id}')">Delete</button>
           </td>
         </tr>`).join("");
 
@@ -1432,8 +1444,10 @@ function showAddKbModal(existingId = null, existingTitle = "", existingFormat = 
   document.body.appendChild(modal);
 }
 
-async function showEditKbModal(id, title, format) {
-  showAddKbModal(id, title, format);
+async function showEditKbModal(id) {
+  const doc = (window._orgData?.kbDocs || []).find(d => d.id === id);
+  const format = doc?.file_type || "";
+  showAddKbModal(id, doc?.title || "", format);
   try {
     const { chunks } = await api("get_kb_chunks", { org_id: currentOrgId, doc_id: id });
     if (format === "json") {
@@ -1476,7 +1490,7 @@ async function submitKbDoc(existingId) {
       content = JSON.parse(document.getElementById("kb-faq-content").value.trim());
       if (!Array.isArray(content)) throw new Error("Must be an array");
     } catch (e) {
-      errEl.innerHTML = `<div class="alert alert-danger">Invalid JSON: ${e.message}</div>`;
+      errEl.innerHTML = `<div class="alert alert-danger">Invalid JSON: ${escHtml(e.message)}</div>`;
       return;
     }
   }
@@ -1490,20 +1504,21 @@ async function submitKbDoc(existingId) {
     if (existingId) payload.id = existingId;
 
     const result = await api("kb_ingest", payload);
-    document.querySelector(".modal-backdrop").remove();
+    document.querySelector(".modal-backdrop")?.remove();
     toast(`${result.chunks_created} chunks ${existingId ? "updated" : "added"}`, "success");
 
     const { org, providers, widget, kbDocs, lastPayment, integrations } = await api("get_org", { org_id: currentOrgId });
     window._orgData = { org, providers, widget, kbDocs, lastPayment, integrations };
     renderKbTab(document.getElementById("tab-content"), kbDocs, org);
   } catch (e) {
-    errEl.innerHTML = `<div class="alert alert-danger">${e.message}</div>`;
+    errEl.innerHTML = `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
     btn.disabled = false;
     btn.innerHTML = existingId ? "Update" : "Add Document";
   }
 }
 
-async function deleteKbDoc(docId, title) {
+async function deleteKbDoc(docId) {
+  const title = (window._orgData?.kbDocs || []).find(d => d.id === docId)?.title || "this document";
   if (!confirm(`Delete "${title}"? This removes all chunks and cannot be undone.`)) return;
   try {
     await api("delete_kb_doc", { org_id: currentOrgId, doc_id: docId });
@@ -1706,7 +1721,7 @@ async function loadGoogleCalendars() {
       if (loading) loading.textContent = "Calendar list unavailable — re-connect Google or connect a separate account to enable selection.";
       return;
     }
-    (calendars || []).forEach(cal => {
+    calendars.forEach(cal => {
       const opt = document.createElement("option");
       opt.value = cal.id;
       opt.textContent = cal.summary + (cal.primary ? " (Primary)" : "");
@@ -2102,7 +2117,8 @@ async function saveSystemPrompt() {
     });
     toast("System prompt saved", "success");
     window._orgData.org.ai_system_prompt_version = currentVersion + 1;
-    document.querySelector(".form-hint") && (document.querySelector(".form-hint").textContent = `Version: ${currentVersion + 1}`);
+    const hint = document.getElementById("s-prompt")?.closest(".form-group")?.querySelector(".form-hint");
+    if (hint) hint.textContent = `Version: ${currentVersion + 1}`;
   } catch (e) { toast(e.message, "error"); }
 }
 
@@ -2172,7 +2188,7 @@ function renderReportsTab(el, org) {
             <select id="r-recipient">
               <option value="">Loading recipients…</option>
             </select>
-            <div class="form-hint">Defaults to the connected inbox. Add notification recipients in the Settings tab.</div>
+            <div class="form-hint">Defaults to the connected inbox. Manage notification recipients in the ${currentIsDemo ? "Notifications" : "Email Setup"} tab.</div>
           </div>
         </div>
         <div style="margin-top:16px">
@@ -2198,35 +2214,39 @@ function renderReportsTab(el, org) {
   refreshSchedules(org.id);
 }
 
-async function loadExportRecipients(orgId) {
+function recipientOptionsHtml(default_email, notification_recipients) {
+  const options = [];
+  if (default_email) {
+    options.push(
+      `<option value="${escHtml(default_email)}">${escHtml(default_email)} (connected inbox)</option>`
+    );
+  }
+  for (const r of notification_recipients) {
+    const label = r.name ? `${r.name} <${r.email}>` : r.email;
+    options.push(`<option value="${escHtml(r.email)}">${escHtml(label)}</option>`);
+  }
+  if (options.length === 0) {
+    options.push(`<option value="" disabled>No recipients configured</option>`);
+  }
+  return options.join("");
+}
+
+async function populateRecipientOptions(selectId, orgId) {
+  const select = document.getElementById(selectId);
+  if (!select) return;
   try {
     const { default_email, notification_recipients } = await api(
       "list_export_recipients",
       { org_id: orgId }
     );
-    const select = document.getElementById("r-recipient");
-    if (!select) return;
-
-    const options = [];
-    if (default_email) {
-      options.push(
-        `<option value="${escHtml(default_email)}">${escHtml(default_email)} (connected inbox)</option>`
-      );
-    }
-    for (const r of notification_recipients) {
-      const label = r.name ? `${r.name} <${r.email}>` : r.email;
-      options.push(`<option value="${escHtml(r.email)}">${escHtml(label)}</option>`);
-    }
-    if (options.length === 0) {
-      options.push(`<option value="" disabled>No recipients configured</option>`);
-    }
-    select.innerHTML = options.join("");
+    select.innerHTML = recipientOptionsHtml(default_email, notification_recipients);
   } catch (e) {
-    const select = document.getElementById("r-recipient");
-    if (select) {
-      select.innerHTML = `<option value="" disabled>Error: ${escHtml(e.message)}</option>`;
-    }
+    select.innerHTML = `<option value="" disabled>Error: ${escHtml(e.message)}</option>`;
   }
+}
+
+async function loadExportRecipients(orgId) {
+  await populateRecipientOptions("r-recipient", orgId);
 }
 
 async function runOnDemandExport() {
@@ -2389,27 +2409,7 @@ function showNewScheduleModal() {
   document.body.appendChild(modal);
 
   // Populate recipient dropdown by reusing the same lookup
-  api("list_export_recipients", { org_id: currentOrgId })
-    .then(({ default_email, notification_recipients }) => {
-      const select = document.getElementById("new-sch-recipient");
-      if (!select) return;
-      const options = [];
-      if (default_email) {
-        options.push(`<option value="${escHtml(default_email)}">${escHtml(default_email)} (connected inbox)</option>`);
-      }
-      for (const r of notification_recipients) {
-        const label = r.name ? `${r.name} <${r.email}>` : r.email;
-        options.push(`<option value="${escHtml(r.email)}">${escHtml(label)}</option>`);
-      }
-      if (options.length === 0) {
-        options.push(`<option value="" disabled>No recipients configured</option>`);
-      }
-      select.innerHTML = options.join("");
-    })
-    .catch((e) => {
-      const select = document.getElementById("new-sch-recipient");
-      if (select) select.innerHTML = `<option value="" disabled>Error: ${escHtml(e.message)}</option>`;
-    });
+  populateRecipientOptions("new-sch-recipient", currentOrgId);
 }
 
 async function createSchedule() {
@@ -2517,7 +2517,7 @@ async function executeEmergencyDisable() {
     toast("All services disabled", "error");
     navigate("orgs");
   } catch (e) {
-    errEl.innerHTML = `<div class="alert alert-danger">${e.message}</div>`;
+    errEl.innerHTML = `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
     btn.disabled = false;
     btn.innerHTML = "Disable Everything";
   }
@@ -2727,7 +2727,7 @@ async function renderPayPalButtons(amount, description, category) {
       },
     }).render("#paypal-buttons");
   } catch (e) {
-    buttonsEl.innerHTML = `<div class="alert alert-danger">Failed to load PayPal: ${e.message}</div>`;
+    buttonsEl.innerHTML = `<div class="alert alert-danger">Failed to load PayPal: ${escHtml(e.message)}</div>`;
   }
 }
 
@@ -3019,16 +3019,16 @@ async function renderSalesReport(main) {
         <table>
           <thead><tr><th>Organization</th><th>Tier</th><th>Created</th><th>Messages Used</th></tr></thead>
           <tbody>
-            ${repOrgs.map(org => `
+            ${repOrgs.map(org => { _nameCache[org.id] = org.name; return `
               <tr>
                 <td>
-                  <a onclick="navigate('org-detail','${org.id}','${escHtml(org.name)}')"
+                  <a onclick="navigate('org-detail','${org.id}')"
                     class="org-link">${escHtml(org.name)}</a>
                 </td>
                 <td><span class="badge badge-gray">${org.subscription_tier}</span></td>
                 <td>${new Date(org.created_at).toLocaleDateString()}</td>
                 <td>${org.messages_used_this_month.toLocaleString()}</td>
-              </tr>`).join("")}
+              </tr>`; }).join("")}
           </tbody>
         </table>
       </div>`).join("");
@@ -3038,7 +3038,7 @@ async function renderSalesReport(main) {
       : `<div class="empty-state"><p>No organizations with sales attribution yet.</p></div>`;
   } catch (e) {
     main.querySelector(".card").innerHTML =
-      `<div class="card-body"><div class="alert alert-danger">${e.message}</div></div>`;
+      `<div class="card-body"><div class="alert alert-danger">${escHtml(e.message)}</div></div>`;
   }
 }
 
@@ -3072,6 +3072,8 @@ async function loadRecipients() {
 
   try {
     const { recipients } = await api("list_recipients", { org_id: currentOrgId });
+    window._recipientsCache = {};
+    for (const r of recipients) window._recipientsCache[r.id] = r;
 
     if (recipients.length === 0) {
       el.innerHTML = `<div class="empty-state" style="padding:24px"><p>No recipients added. Notifications go to the connected inbox.</p></div>`;
@@ -3098,7 +3100,7 @@ async function loadRecipients() {
                 onchange="toggleRecipient('${r.id}', this.checked)">
               <span class="toggle-slider"></span>
             </label>
-            <button class="btn btn-ghost btn-sm" onclick="showEditRecipientModal('${r.id}','${escHtml(r.email)}','${escHtml(r.name || "")}','${escHtml(JSON.stringify(r.notify_on))}')">Edit</button>
+            <button class="btn btn-ghost btn-sm" onclick="showEditRecipientModal('${r.id}')">Edit</button>
             <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="deleteRecipient('${r.id}')">Remove</button>
           </div>` : `<div class="flex-row">
             <span class="badge ${r.is_active ? "badge-green" : "badge-gray"}">${r.is_active ? "Active" : "Disabled"}</span>
@@ -3108,7 +3110,7 @@ async function loadRecipients() {
 
     el.innerHTML = rows;
   } catch (e) {
-    el.innerHTML = `<div class="card-body"><div class="alert alert-danger">${e.message}</div></div>`;
+    el.innerHTML = `<div class="card-body"><div class="alert alert-danger">${escHtml(e.message)}</div></div>`;
   }
 }
 
@@ -3179,14 +3181,14 @@ function recipientModalHtml(title, id, email, name, notifyOn) {
 function toggleEscalationSubTypes(checked) {
   const container = document.getElementById("escalation-subtypes");
   if (container) container.style.display = checked ? "block" : "none";
-  ["escalation:frustrated", "escalation:lead", "escalation:kb_gap"].forEach(key => {
+  ESCALATION_SUBTYPES.map(s => s.key).forEach(key => {
     const el = document.getElementById(`rn-${key}`);
     if (el) el.checked = checked;
   });
 }
 
 function updateEscalationParent() {
-  const anyChecked = ["escalation:frustrated", "escalation:lead", "escalation:kb_gap"]
+  const anyChecked = ESCALATION_SUBTYPES.map(s => s.key)
     .some(key => document.getElementById(`rn-${key}`)?.checked);
   const parent = document.getElementById("rn-escalation");
   if (parent) parent.checked = anyChecked;
@@ -3201,11 +3203,13 @@ function showAddRecipientModal() {
   document.body.appendChild(modal);
 }
 
-function showEditRecipientModal(id, email, name, notifyOn) {
-  notifyOn = typeof notifyOn === "string" ? JSON.parse(notifyOn) : notifyOn;
+function showEditRecipientModal(id) {
+  const r = window._recipientsCache?.[id];
+  if (!r) return;
+  const notifyOn = typeof r.notify_on === "string" ? JSON.parse(r.notify_on) : r.notify_on;
   const modal = document.createElement("div");
   modal.className = "modal-backdrop";
-  modal.innerHTML = recipientModalHtml("Edit Recipient", id, email, name, notifyOn);
+  modal.innerHTML = recipientModalHtml("Edit Recipient", id, r.email, r.name || "", notifyOn);
   document.body.appendChild(modal);
 }
 
@@ -3217,7 +3221,7 @@ function getRecipientFormValues() {
 
   // Collect escalation sub-types if parent is checked
   if (document.getElementById("rn-escalation")?.checked) {
-    const subTypes = ["escalation:frustrated", "escalation:lead", "escalation:kb_gap"]
+    const subTypes = ESCALATION_SUBTYPES.map(s => s.key)
       .filter(key => document.getElementById(`rn-${key}`)?.checked);
     // All 3 checked → store "escalation" (compact, auto-includes future sub-types)
     if (subTypes.length === 3) {
@@ -3245,11 +3249,11 @@ async function addRecipient() {
 
   try {
     await api("add_recipient", { org_id: currentOrgId, email, name, notify_on: notifyOn });
-    document.querySelector(".modal-backdrop").remove();
+    document.querySelector(".modal-backdrop")?.remove();
     toast("Recipient added", "success");
     loadRecipients();
   } catch (e) {
-    errEl.innerHTML = `<div class="alert alert-danger">${e.message}</div>`;
+    errEl.innerHTML = `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
     btn.disabled = false;
     btn.innerHTML = "Add Recipient";
   }
@@ -3270,11 +3274,11 @@ async function saveRecipient(id) {
       recipient_id: id,
       updates: { email, name: name || null, notify_on: notifyOn },
     });
-    document.querySelector(".modal-backdrop").remove();
+    document.querySelector(".modal-backdrop")?.remove();
     toast("Recipient updated", "success");
     loadRecipients();
   } catch (e) {
-    errEl.innerHTML = `<div class="alert alert-danger">${e.message}</div>`;
+    errEl.innerHTML = `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
     btn.disabled = false;
     btn.innerHTML = "Save Changes";
   }
@@ -3357,6 +3361,8 @@ async function loadTeamList() {
   const container = document.getElementById("team-list-container");
   try {
     const { team } = await api("list_team");
+    window._teamCache = {};
+    for (const m of team || []) window._teamCache[m.id] = m;
     if (!team || team.length === 0) {
       container.innerHTML = `<p class="text-muted" style="padding:24px;text-align:center">No team members yet.</p>`;
       return;
@@ -3389,9 +3395,9 @@ async function loadTeamList() {
               <td>${roleBadge}</td>
               <td>${statusBadge}</td>
               <td style="text-align:right">
-                <button class="btn btn-ghost btn-sm" onclick='showEditTeamMemberModal(${JSON.stringify(m).replace(/'/g, "&#39;")})'>Edit</button>
-                ${!isSelf ? `<button class="btn btn-ghost btn-sm" style="color:${m.is_active ? "var(--danger)" : "var(--success)"}" onclick='toggleTeamMember("${m.id}", ${!m.is_active})'>${m.is_active ? "Deactivate" : "Reactivate"}</button>
-                <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick='deleteTeamMember("${m.id}", "${escHtml(m.display_name)}")'>Delete</button>` : ""}
+                <button class="btn btn-ghost btn-sm" onclick="showEditTeamMemberModal('${m.id}')">Edit</button>
+                ${!isSelf ? `<button class="btn btn-ghost btn-sm" style="color:${m.is_active ? "var(--danger)" : "var(--success)"}" onclick="toggleTeamMember('${m.id}', ${!m.is_active})">${m.is_active ? "Deactivate" : "Reactivate"}</button>
+                <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="deleteTeamMember('${m.id}')">Delete</button>` : ""}
               </td>
             </tr>`;
           }).join("")}
@@ -3468,7 +3474,9 @@ async function submitAddTeamMember() {
   }
 }
 
-function showEditTeamMemberModal(member) {
+function showEditTeamMemberModal(memberId) {
+  const member = window._teamCache?.[memberId];
+  if (!member) return;
   const modal = document.createElement("div");
   modal.className = "modal-backdrop";
   modal.innerHTML = `
@@ -3539,7 +3547,8 @@ async function toggleTeamMember(userId, activate) {
   }
 }
 
-async function deleteTeamMember(userId, name) {
+async function deleteTeamMember(userId) {
+  const name = window._teamCache?.[userId]?.display_name || "this member";
   if (!confirm(`Permanently delete ${name}? This removes their account entirely and cannot be undone.`)) return;
   try {
     await api("delete_team_member", { user_id: userId });
@@ -3625,6 +3634,8 @@ function initSidebar() {
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 document.addEventListener("DOMContentLoaded", () => {
+  const vf = document.querySelector(".version-footer");
+  if (vf && CONFIG.appVersion) vf.textContent = "V" + CONFIG.appVersion;
   _supabase = window.supabase.createClient(CONFIG.supabaseUrl, CONFIG.anonKey);
   initSidebar();
 

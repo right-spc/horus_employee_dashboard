@@ -35,11 +35,8 @@
   --warning-light: rgba(255, 171, 64, 0.12);
   --danger: #ef4444;
   --danger-light: rgba(239, 68, 68, 0.12);
-  --violet: #7c4dff;
 
-  /* Legacy aliases (referenced by inline styles in dashboard.js/index.html) */
-  --gold: var(--primary);
-  --muted: var(--text-muted);
+  /* Legacy aliases (referenced by inline styles in dashboard.js) */
   --text-primary: var(--text);
   --bg-secondary: var(--surface);
   --bg-tertiary: var(--bg-soft);
@@ -84,7 +81,6 @@ body {
 .mb-4 { margin-bottom: 20px; }
 .flex-row { display: flex; align-items: center; gap: 8px; }
 .flex-row-spread { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.spacer { flex: 1; }
 .org-link { font-weight: 600; color: var(--primary); cursor: pointer; text-decoration: none; transition: color 0.15s var(--ease); }
 .org-link:hover { color: var(--primary-hover); }
 .card-body-flush { padding: 0; }

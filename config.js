@@ -7,6 +7,7 @@
 // ============================================
 
 const CONFIG = {
+  appVersion: '1.2.0',
   // Found in Supabase → Project Settings → API
   supabaseUrl: 'https://oknqxlmyhmxbzqtnlraq.supabase.co',
   anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9rbnF4bG15aG14YnpxdG5scmFxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE4MDA3NTMsImV4cCI6MjA4NzM3Njc1M30.dbrWedvCASg8_JAazbaUKPYcPYwwvbYiBOpJnl7dToY',  // Public key — safe to expose

@@ -1,11 +1,10 @@
 // ============================================
 // EDGE FUNCTION: handle-inbound-email
 // Receives inbound email webhooks, assembles
-// context, calls Claude, routes the response.
+// context, calls Kimi, routes the response.
 // ============================================
 
 import { createClient } from "npm:@supabase/supabase-js@2";
-import Anthropic from "npm:@anthropic-ai/sdk";
 
 // ── Types ────────────────────────────────────
 interface InboundEmailPayload {
@@ -31,13 +30,25 @@ interface RouteParseResult {
 }
 
 // ── Constants ────────────────────────────────
-const CONVERSATION_WINDOW = 12;    // Max messages to load from history
-const SUMMARY_THRESHOLD = 8;       // Summarize after this many messages
-const RECENT_MESSAGES_KEEP = 4;    // Keep this many recent messages in full
+const CONVERSATION_WINDOW = 50;    // Max messages to load from history
+const SUMMARY_THRESHOLD = 100;     // Summarize after this many messages
+const RECENT_MESSAGES_KEEP = 20;   // Keep this many recent messages in full
 const INACTIVE_DAYS_THRESHOLD = 30; // Flag old convos in prompt
-const KB_CHUNK_LIMIT = 6;          // Max KB chunks to inject per call
 const DEFAULT_AUTO_SEND_THRESHOLD = 0.75;
 const MONTHLY_PLAN_DAYS = 30;          // Duration of a monthly subscription period
+
+// ── Kimi (Telnyx Inference) ──────────────────
+// OpenAI-compatible chat completions. Whole KB is injected into the system
+// prompt — K2.6's 256K context + Telnyx prompt caching make a retrieval
+// pre-filter unnecessary (biggest KB in the system is ~34KB chars).
+const KIMI_ENDPOINT = "https://api.telnyx.com/v2/ai/chat/completions";
+const KIMI_MODEL = "moonshotai/Kimi-K2.6";
+const REASONING_EFFORT = "low";  // keeps routing judgment without max latency
+const KB_MAX_CHARS = 600_000;    // ~150K tokens — safety cap for whole-KB injection
+// Telnyx rates per token (2026-09): input $0.665/M, cached input $0.08/M, output $4.00/M
+const KIMI_COST_INPUT = 0.665 / 1_000_000;
+const KIMI_COST_CACHED_INPUT = 0.08 / 1_000_000;
+const KIMI_COST_OUTPUT = 4.0 / 1_000_000;
 
 // ── Main Handler ─────────────────────────────
 Deno.serve(async (req: Request) => {
@@ -63,9 +74,6 @@ Deno.serve(async (req: Request) => {
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
   );
-  const anthropic = new Anthropic({
-    apiKey: Deno.env.get("ANTHROPIC_API_KEY")!,
-  });
 
   // ── 1. DETECT REQUEST TYPE ─────────────────
   // Two possible callers:
@@ -105,7 +113,7 @@ Deno.serve(async (req: Request) => {
   const results = [];
   for (const payload of payloads) {
     try {
-      results.push(await processInboundEmail(payload, supabase, anthropic));
+      results.push(await processInboundEmail(payload, supabase));
     } catch (e) {
       console.error(`Failed to process email for ${payload.sender_email}:`, e.message);
       results.push({ error: e.message });
@@ -120,8 +128,7 @@ Deno.serve(async (req: Request) => {
 // already been fetched and structured from the Gmail API.
 async function processInboundEmail(
   payload: InboundEmailPayload,
-  supabase: ReturnType<typeof createClient>,
-  anthropic: Anthropic
+  supabase: ReturnType<typeof createClient>
 ): Promise<Record<string, unknown>> {
 
   // ── 2. LOAD ORGANIZATION CONFIG ────────────
@@ -433,7 +440,7 @@ async function processInboundEmail(
   if ((totalMsgCount ?? 0) > SUMMARY_THRESHOLD) {
     // Summarize older messages, keep only recent ones in full
     conversationSummary = await getOrUpdateSummary(
-      supabase, anthropic, conversation.id,
+      supabase, conversation.id,
       totalMsgCount ?? 0, conversation.summary, conversation.summary_msg_count ?? 0,
       ["sent", "auto_sent"]
     );
@@ -459,12 +466,9 @@ async function processInboundEmail(
     history = (historyMessages ?? []).reverse();
   }
 
-  // 7b. KB chunk retrieval (Haiku selects relevant chunks by code)
-  const recentHistory = (history ?? []).slice(-3);
-  const kbChunks = await selectKbChunks(
-    anthropic, supabase, payload.organization_id,
-    payload.body_text, recentHistory
-  );
+  // 7b. Load the org's full knowledge base (injected wholesale into the
+  // system prompt — see KIMI constants above)
+  const kbChunks = await loadAllKbChunks(supabase, payload.organization_id);
 
   // 7c. Check if conversation is stale (affects prompt instruction)
   const lastMessageAt = new Date(conversation.last_message_at);
@@ -497,89 +501,92 @@ async function processInboundEmail(
   }
 
   // ── 9. BUILD MESSAGES ARRAY ────────────────
-  const claudeMessages: Anthropic.MessageParam[] = [
+  const kimiMessages: Array<Record<string, unknown>> = [
+    { role: "system", content: systemPrompt },
     ...history.map((m) => ({
-      role: m.role === "customer" ? ("user" as const) : ("assistant" as const),
+      role: m.role === "customer" ? "user" : "assistant",
       content: m.content,
     })),
     // The new inbound message
     {
-      role: "user" as const,
+      role: "user",
       content: payload.body_text,
     },
   ];
 
-  // ── 10. CALL CLAUDE ────────────────────────
+  // ── 10. CALL KIMI ──────────────────────────
   const startTime = Date.now();
-  console.log("Calling Claude API...");
+  console.log("Calling Kimi API...");
   const toolsArr: any[] = [SUBMIT_RESPONSE_TOOL];
   if (calendlyIntegration) {
     toolsArr.push(...CALENDLY_TOOLS);
     if (googleCalendarProvider) toolsArr.push(BOOK_APPOINTMENT_TOOL);
   }
 
-  let claudeResponse = await callClaudeWithRetry(anthropic, {
-    model: "claude-sonnet-4-6",
-    max_tokens: 1000,
-    system: systemPrompt,
-    messages: claudeMessages,
+  let kimiResponse = await callKimiWithRetry({
+    model: KIMI_MODEL,
+    max_tokens: 2000,
+    reasoning_effort: REASONING_EFFORT,
+    messages: kimiMessages,
     tools: toolsArr,
-    tool_choice: { type: "any" },
+    tool_choice: "required",
   });
 
   // Handle tool use loop (max 3 iterations)
-  let totalInputTokens = claudeResponse.usage.input_tokens;
-  let totalOutputTokens = claudeResponse.usage.output_tokens;
+  let totalInputTokens = kimiResponse.usage?.prompt_tokens ?? 0;
+  let totalCachedTokens = kimiResponse.usage?.prompt_tokens_details?.cached_tokens ?? 0;
+  let totalOutputTokens = kimiResponse.usage?.completion_tokens ?? 0;
   let toolUseIterations = 0;
   let submitResponseData: Record<string, unknown> | null = null;
 
   while (
-    claudeResponse.stop_reason === "tool_use" &&
+    kimiResponse.choices?.[0]?.finish_reason === "tool_calls" &&
     toolUseIterations < 3
   ) {
     toolUseIterations++;
-    const toolUseBlocks = claudeResponse.content.filter(
-      (block: any) => block.type === "tool_use"
-    );
+    const assistantMsg = kimiResponse.choices[0].message;
+    const toolCalls = (assistantMsg.tool_calls ?? []) as any[];
 
-    console.log(`Tool use iteration ${toolUseIterations}, tools called:`, toolUseBlocks.map((t: any) => t.name));
+    console.log(`Tool use iteration ${toolUseIterations}, tools called:`, toolCalls.map((t: any) => t.function?.name));
 
     // Check if submit_response was called — that's the final response
-    const submitBlock = toolUseBlocks.find((t: any) => t.name === "submit_response");
-    if (submitBlock) {
-      submitResponseData = submitBlock.input;
+    const submitCall = toolCalls.find((t: any) => t.function?.name === "submit_response");
+    if (submitCall) {
+      submitResponseData = parseToolArguments(submitCall.function?.arguments);
     }
 
     // Execute other tools (not submit_response)
-    const toolResults: any[] = [];
-    for (const toolUse of toolUseBlocks) {
-      if (toolUse.name === "submit_response") {
-        toolResults.push({
-          type: "tool_result" as const,
-          tool_use_id: toolUse.id,
+    const toolResultMessages: any[] = [];
+    for (const toolCall of toolCalls) {
+      const toolName = toolCall.function?.name as string;
+      const toolInput = parseToolArguments(toolCall.function?.arguments);
+      if (toolName === "submit_response") {
+        toolResultMessages.push({
+          role: "tool",
+          tool_call_id: toolCall.id,
           content: JSON.stringify({ received: true }),
         });
         continue;
       }
       let result;
-      if (toolUse.name === "book_appointment" && googleCalendarProvider) {
+      if (toolName === "book_appointment" && googleCalendarProvider) {
         const profile = (org.business_profiles as Record<string, unknown>[])?.[0];
         const bName = (profile?.business_name as string) || "the business";
         result = await executeBookingTool(
-          supabase, googleCalendarProvider, toolUse.input,
+          supabase, googleCalendarProvider, toolInput,
           businessTimezone, bName
         );
       } else if (calendlyIntegration) {
         result = await executeCalendlyTool(
-          supabase, calendlyIntegration, toolUse.name, toolUse.input,
+          supabase, calendlyIntegration, toolName, toolInput,
           businessTimezone
         );
       } else {
         result = { error: true, message: "Unknown tool" };
       }
-      toolResults.push({
-        type: "tool_result" as const,
-        tool_use_id: toolUse.id,
+      toolResultMessages.push({
+        role: "tool",
+        tool_call_id: toolCall.id,
         content: JSON.stringify(result),
       });
     }
@@ -587,35 +594,38 @@ async function processInboundEmail(
     // If submit_response was called, we're done
     if (submitResponseData) break;
 
-    claudeMessages.push({ role: "assistant", content: claudeResponse.content });
-    claudeMessages.push({ role: "user", content: toolResults });
+    kimiMessages.push({
+      role: "assistant",
+      content: assistantMsg.content ?? "",
+      tool_calls: assistantMsg.tool_calls,
+    });
+    kimiMessages.push(...toolResultMessages);
 
-    claudeResponse = await callClaudeWithRetry(anthropic, {
-      model: "claude-sonnet-4-6",
-      max_tokens: 1000,
-      system: systemPrompt,
-      messages: claudeMessages,
+    kimiResponse = await callKimiWithRetry({
+      model: KIMI_MODEL,
+      max_tokens: 2000,
+      reasoning_effort: REASONING_EFFORT,
+      messages: kimiMessages,
       tools: toolsArr,
-      tool_choice: { type: "any" },
+      tool_choice: "required",
     });
 
-    totalInputTokens += claudeResponse.usage.input_tokens;
-    totalOutputTokens += claudeResponse.usage.output_tokens;
+    totalInputTokens += kimiResponse.usage?.prompt_tokens ?? 0;
+    totalCachedTokens += kimiResponse.usage?.prompt_tokens_details?.cached_tokens ?? 0;
+    totalOutputTokens += kimiResponse.usage?.completion_tokens ?? 0;
   }
 
   const processingTimeMs = Date.now() - startTime;
 
-  const rawResponseText = claudeResponse.content
-    .filter((block: any) => block.type === "text")
-    .map((block: any) => block.text)
-    .join("");
-  console.log("Claude API responded, raw:", rawResponseText.slice(0, 100));
+  const rawResponseText = (kimiResponse.choices?.[0]?.message?.content as string) ?? "";
+  console.log("Kimi API responded, raw:", rawResponseText.slice(0, 100));
 
   const tokensUsed = totalInputTokens + totalOutputTokens;
 
   const costEstimate =
-    totalInputTokens * 0.000003 +
-    totalOutputTokens * 0.000015;
+    (totalInputTokens - totalCachedTokens) * KIMI_COST_INPUT +
+    totalCachedTokens * KIMI_COST_CACHED_INPUT +
+    totalOutputTokens * KIMI_COST_OUTPUT;
 
   // ── 11. PARSE ROUTING CODE ─────────────────
   let parsed: RouteParseResult;
@@ -657,7 +667,7 @@ async function processInboundEmail(
       status: "rejected",
       routing_code: "IGNORE",
       confidence_score_reported: null,
-      ai_model: "claude-sonnet-4-6",
+      ai_model: KIMI_MODEL,
       ai_prompt_version: org.ai_system_prompt_version,
       processing_time_ms: processingTimeMs,
       tokens_used: tokensUsed,
@@ -689,7 +699,7 @@ async function processInboundEmail(
         status: "auto_sent",
         routing_code: "ESCALATE",
         confidence_score_reported: null,
-        ai_model: "claude-sonnet-4-6",
+        ai_model: KIMI_MODEL,
         ai_prompt_version: org.ai_system_prompt_version,
         processing_time_ms: processingTimeMs,
         tokens_used: tokensUsed,
@@ -798,7 +808,7 @@ async function processInboundEmail(
       routing_code: "DRAFT",
       external_message_id: payload.message_id,
       confidence_score_reported: confidence,
-      ai_model: "claude-sonnet-4-6",
+      ai_model: KIMI_MODEL,
       ai_prompt_version: org.ai_system_prompt_version,
       processing_time_ms: processingTimeMs,
       tokens_used: tokensUsed,
@@ -903,117 +913,39 @@ async function saveCustomerMessage(
   });
 }
 
-// ── Helper: Extract keywords for KB search ───
-function extractKeywords(text: string): string {
-  // Strip common words, punctuation, keep meaningful terms
-  // In production consider a proper NLP library or send to Claude for keyword extraction
-  const stopWords = new Set([
-    "the", "a", "an", "and", "or", "but", "in", "on", "at", "to",
-    "for", "of", "with", "is", "are", "was", "were", "be", "been",
-    "have", "has", "had", "do", "does", "did", "will", "would",
-    "could", "should", "may", "might", "i", "you", "we", "they",
-    "he", "she", "it", "my", "your", "our", "their", "this", "that",
-  ]);
-
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .split(/\s+/)
-    .filter((w) => w.length > 3 && !stopWords.has(w))
-    .slice(0, 10) // Top 10 keywords
-    .join(" | "); // Supabase websearch OR operator
-}
-
-// ── Helper: Haiku-powered KB chunk selection ──
-// Loads all chunks for the org, sends them to Haiku with their codes,
-// and lets Haiku pick 1-6 relevant chunks. Falls back to keyword search on failure.
-async function selectKbChunks(
-  anthropic: Anthropic,
+// ── Helper: Load the org's entire knowledge base ──
+// All chunks are injected into the system prompt (K2.6 256K context + Telnyx
+// prompt caching make a retrieval pre-filter unnecessary). KB_MAX_CHARS is a
+// safety valve for pathologically large knowledge bases.
+async function loadAllKbChunks(
   supabase: ReturnType<typeof createClient>,
   organizationId: string,
-  currentMessage: string,
-  recentHistory: Array<{ role: string; content: string }>,
 ): Promise<Array<{ content: string }>> {
-  try {
-    // 1. Load all chunks for the org
-    const { data: allChunks } = await supabase
-      .schema("kb").from("kb_chunks")
-      .select("chunk_code, content")
-      .eq("organization_id", organizationId)
-      .order("chunk_index", { ascending: true });
-
-    if (!allChunks || allChunks.length === 0) return [];
-
-    // 2. Build chunk index for Haiku
-    const chunkIndex = allChunks
-      .map((c: { chunk_code: string; content: string }) => `[${c.chunk_code}] ${c.content}`)
-      .join("\n\n");
-
-    // 3. Build conversation context (last assistant + customer exchange only)
-    const lastTwo = recentHistory.slice(-2);
-    let contextBlock = "";
-    if (lastTwo.length > 0) {
-      contextBlock = "\nCONVERSATION CONTEXT:\n" + lastTwo
-        .map((m) => `${m.role === "customer" ? "Customer" : "Assistant"}: ${m.content}`)
-        .join("\n") + "\n";
-    }
-
-    // 4. Call Haiku with a single user message (no multi-turn conversation)
-    const response = await anthropic.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 80,
-      system: "You are a retrieval classifier. Return ONLY space-separated chunk codes. No other text.",
-      messages: [{
-        role: "user",
-        content: `KB ENTRIES:\n${chunkIndex}\n${contextBlock}\nCURRENT CUSTOMER MESSAGE:\n${currentMessage}\n\nReturn the 1-6 most relevant KB entry codes for the customer's message. If none are relevant, return NONE.`,
-      }],
-    });
-
-    const text = response.content[0]?.type === "text" ? response.content[0].text.trim() : "";
-
-    if (!text || text.toUpperCase() === "NONE") return [];
-
-    // 5. Parse codes and filter chunks
-    const returnedCodes = new Set(
-      text.toLowerCase().replace(/[,|]/g, " ").split(/\s+/).filter(Boolean)
-    );
-    const selected = allChunks
-      .filter((c: { chunk_code: string }) => returnedCodes.has(c.chunk_code))
-      .slice(0, KB_CHUNK_LIMIT)
-      .map((c: { content: string }) => ({ content: c.content }));
-
-    if (selected.length === 0) {
-      console.warn("Haiku returned codes that matched no chunks:", text);
-      return fallbackSearch(supabase, organizationId, currentMessage);
-    }
-
-    console.log(`KB chunks selected by Haiku: ${selected.length} of ${allChunks.length}`);
-    return selected;
-  } catch (error) {
-    console.warn("selectKbChunks failed, falling back:", error.message);
-    return fallbackSearch(supabase, organizationId, currentMessage);
-  }
-}
-
-async function fallbackSearch(
-  supabase: ReturnType<typeof createClient>,
-  organizationId: string,
-  message: string,
-): Promise<Array<{ content: string }>> {
-  const keywords = extractKeywords(message);
-  const { data } = await supabase
+  const { data: allChunks } = await supabase
     .schema("kb").from("kb_chunks")
     .select("content")
     .eq("organization_id", organizationId)
-    .textSearch("search_vector", keywords, { type: "websearch" })
-    .limit(KB_CHUNK_LIMIT);
-  return data ?? [];
+    .order("chunk_index", { ascending: true });
+
+  if (!allChunks || allChunks.length === 0) return [];
+
+  let total = 0;
+  const result: Array<{ content: string }> = [];
+  for (const c of allChunks) {
+    total += (c.content as string).length;
+    if (total > KB_MAX_CHARS) {
+      console.warn(`KB truncated at ${KB_MAX_CHARS} chars for org ${organizationId}`);
+      result.push({ content: "[Note: knowledge base truncated due to size]" });
+      break;
+    }
+    result.push({ content: c.content });
+  }
+  return result;
 }
 
 // ── Helper: Conversation summarization ──────────────
 async function getOrUpdateSummary(
   supabase: ReturnType<typeof createClient>,
-  anthropic: Anthropic,
   conversationId: string,
   totalCount: number,
   existingSummary: string | null,
@@ -1047,14 +979,19 @@ async function getOrUpdateSummary(
     : newMsgText;
 
   try {
-    const response = await anthropic.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 400,
-      system: "Summarize this conversation concisely. You MUST preserve ALL specific details: full names, email addresses, phone numbers, dates, times, prices, appointment details, booking references, and any commitments made. Output only the summary paragraph.",
-      messages: [{ role: "user", content: input }],
+    const response = await callKimiWithRetry({
+      model: KIMI_MODEL,
+      max_tokens: 800,
+      reasoning_effort: REASONING_EFFORT,
+      messages: [
+        { role: "system", content: "Summarize this conversation concisely. You MUST preserve ALL specific details: full names, email addresses, phone numbers, dates, times, prices, appointment details, booking references, and any commitments made. Output only the summary paragraph." },
+        { role: "user", content: input },
+      ],
     });
 
-    const summary = response.content[0]?.type === "text" ? response.content[0].text : "";
+    const summary = ((response.choices?.[0]?.message?.content as string) ?? "").trim();
+
+    if (!summary) return existingSummary;
 
     await supabase
       .schema("messaging").from("conversations")
@@ -1185,14 +1122,12 @@ You CAN see real calendar availability. Do not tell customers you cannot check t
   // Append KB chunks if found
   if (kbChunks.length > 0) {
     const kbText = kbChunks.map((c, i) => `[${i + 1}] ${c.content}`).join("\n\n");
-    prompt += `\n\n## Relevant Knowledge Base Excerpts\n${kbText}`;
+    prompt += `\n\n## Knowledge Base\n${kbText}`;
   }
 
-  // Stale conversation warning
-  if (isStaleConversation) {
-    prompt += `\n\n## Note\nThis conversation was last active ${daysSinceLastMessage} days ago. ` +
-      `The new message may be unrelated to previous topics — use your judgment and treat it as a fresh inquiry if so.`;
-  }
+  // Routing rules (static per org — kept inside the cacheable prefix)
+  const routingRules = (org.routing_rules as string) || DEFAULT_ROUTING_RULES;
+  prompt += `\n\n## Routing Rules\n${routingRules}`;
 
   // Signature handling — a business-configured signature is appended in code
   // after your response. End with your last sentence of substance, no signoff.
@@ -1202,16 +1137,21 @@ You CAN see real calendar availability. Do not tell customers you cannot check t
       `"Thanks", business name, disclaimer, etc.). End your response with the last sentence of substance.`;
   }
 
-  // Current date so Claude knows what "today" and "tomorrow" mean
+  // ── Dynamic tail: everything below varies per request and would break the
+  // prompt-cache prefix, so it goes last ──
+
+  // Current date so Kimi knows what "today" and "tomorrow" mean
   const now = new Date();
   const dateStr = now.toISOString().split("T")[0];
   const dayName = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][now.getUTCDay()];
   prompt += `\n\n## Current Date\nToday is ${dayName}, ${dateStr} (UTC).`;
 
-  const routingRules = (org.routing_rules as string) || DEFAULT_ROUTING_RULES;
-  prompt += `\n\n## Routing Rules\n${routingRules}`;
+  // Stale conversation warning
+  if (isStaleConversation) {
+    prompt += `\n\n## Note\nThis conversation was last active ${daysSinceLastMessage} days ago. ` +
+      `The new message may be unrelated to previous topics — use your judgment and treat it as a fresh inquiry if so.`;
+  }
 
-  console.log(prompt); // TEMP
   return prompt;
 }
 
@@ -1429,98 +1369,121 @@ async function fetchGmailHistory(
 
 const CALENDLY_TOOLS = [
   {
-    name: "check_availability",
-    description:
-      "Check available appointment times on the business calendar. Use this when a customer asks about availability, wants to book an appointment, or asks when they can come in.",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        start_date: {
-          type: "string",
-          description: "Start date in YYYY-MM-DD format. Defaults to today.",
+    type: "function",
+    function: {
+      name: "check_availability",
+      description:
+        "Check available appointment times on the business calendar. Use this when a customer asks about availability, wants to book an appointment, or asks when they can come in.",
+      parameters: {
+        type: "object",
+        properties: {
+          start_date: {
+            type: "string",
+            description: "Start date in YYYY-MM-DD format. Defaults to today.",
+          },
+          end_date: {
+            type: "string",
+            description: "End date in YYYY-MM-DD format. Defaults to 7 days from start_date.",
+          },
+          event_type_name: {
+            type: "string",
+            description: "Name of the specific service/event type. If omitted, checks the default.",
+          },
         },
-        end_date: {
-          type: "string",
-          description: "End date in YYYY-MM-DD format. Defaults to 7 days from start_date.",
-        },
-        event_type_name: {
-          type: "string",
-          description: "Name of the specific service/event type. If omitted, checks the default.",
-        },
+        required: [] as string[],
       },
-      required: [] as string[],
     },
   },
 ];
 
 const BOOK_APPOINTMENT_TOOL = {
-  name: "book_appointment",
-  description:
-    "Book an appointment on the business calendar. Creates a Google Calendar event and sends the customer a calendar invite. Use ONLY after the customer has confirmed a specific time and provided their name and email.",
-  input_schema: {
-    type: "object" as const,
-    properties: {
-      start_time: {
-        type: "string",
-        description: "The EXACT start_time_iso value from check_availability results. Copy it verbatim — never construct or modify datetime strings yourself.",
+  type: "function",
+  function: {
+    name: "book_appointment",
+    description:
+      "Book an appointment on the business calendar. Creates a Google Calendar event and sends the customer a calendar invite. Use ONLY after the customer has confirmed a specific time and provided their name and email.",
+    parameters: {
+      type: "object",
+      properties: {
+        start_time: {
+          type: "string",
+          description: "The EXACT start_time_iso value from check_availability results. Copy it verbatim — never construct or modify datetime strings yourself.",
+        },
+        duration_minutes: {
+          type: "number",
+          description: "Duration from check_availability's duration_minutes field.",
+        },
+        customer_name: {
+          type: "string",
+          description: "Customer's full name.",
+        },
+        customer_email: {
+          type: "string",
+          description: "Customer's email address (calendar invite sent here).",
+        },
+        service_name: {
+          type: "string",
+          description: "Name of the service being booked.",
+        },
+        notes: {
+          type: "string",
+          description: "Additional details or special requests from the customer.",
+        },
       },
-      duration_minutes: {
-        type: "number",
-        description: "Duration from check_availability's duration_minutes field.",
-      },
-      customer_name: {
-        type: "string",
-        description: "Customer's full name.",
-      },
-      customer_email: {
-        type: "string",
-        description: "Customer's email address (calendar invite sent here).",
-      },
-      service_name: {
-        type: "string",
-        description: "Name of the service being booked.",
-      },
-      notes: {
-        type: "string",
-        description: "Additional details or special requests from the customer.",
-      },
+      required: ["start_time", "duration_minutes", "customer_name", "customer_email"] as string[],
     },
-    required: ["start_time", "duration_minutes", "customer_name", "customer_email"] as string[],
   },
 };
 
 const SUBMIT_RESPONSE_TOOL = {
-  name: "submit_response",
-  description: "Submit your final response to the customer. You MUST call this tool for EVERY response. Put your entire customer-facing message in response_text — do not output any text outside of this tool.",
-  input_schema: {
-    type: "object" as const,
-    properties: {
-      response_text: {
-        type: "string",
-        description: "Your complete response to the customer. Do NOT include any routing codes or metadata in this text.",
+  type: "function",
+  function: {
+    name: "submit_response",
+    description: "Submit your final response to the customer. You MUST call this tool for EVERY response. Put your entire customer-facing message in response_text — do not output any text outside of this tool.",
+    parameters: {
+      type: "object",
+      properties: {
+        response_text: {
+          type: "string",
+          description: "Your complete response to the customer. Do NOT include any routing codes or metadata in this text.",
+        },
+        routing: {
+          type: "string",
+          enum: ["DRAFT", "IGNORE", "ESCALATE_FRUSTRATED", "ESCALATE_KB_GAP", "ESCALATE_LEAD_HIGH", "ESCALATE_LEAD_MID", "ESCALATE_LEAD_LOW"],
+          description: "DRAFT: normal response. IGNORE: spam/not a real inquiry. ESCALATE_FRUSTRATED: customer is upset or threatening. ESCALATE_KB_GAP: question outside your knowledge. ESCALATE_LEAD_HIGH/MID/LOW: potential sales lead with priority.",
+        },
+        confidence: {
+          type: "number",
+          description: "0.00–1.00. How confident you are this response fully addresses the customer. Be conservative — below 0.75 if uncertain about any detail.",
+        },
+        subject: {
+          type: "string",
+          description: "2–5 word summary of the conversation topic (e.g. 'Haircut appointment Tuesday').",
+        },
       },
-      routing: {
-        type: "string",
-        enum: ["DRAFT", "IGNORE", "ESCALATE_FRUSTRATED", "ESCALATE_KB_GAP", "ESCALATE_LEAD_HIGH", "ESCALATE_LEAD_MID", "ESCALATE_LEAD_LOW"],
-        description: "DRAFT: normal response. IGNORE: spam/not a real inquiry. ESCALATE_FRUSTRATED: customer is upset or threatening. ESCALATE_KB_GAP: question outside your knowledge. ESCALATE_LEAD_HIGH/MID/LOW: potential sales lead with priority.",
-      },
-      confidence: {
-        type: "number",
-        description: "0.00–1.00. How confident you are this response fully addresses the customer. Be conservative — below 0.75 if uncertain about any detail.",
-      },
-      subject: {
-        type: "string",
-        description: "2–5 word summary of the conversation topic (e.g. 'Haircut appointment Tuesday').",
-      },
+      required: ["response_text", "routing", "confidence", "subject"] as string[],
     },
-    required: ["response_text", "routing", "confidence", "subject"] as string[],
   },
 };
+
+// Parse an OpenAI-format tool_call arguments JSON string safely.
+function parseToolArguments(raw: string | undefined): Record<string, unknown> {
+  try {
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    console.warn("Malformed tool arguments:", raw?.slice(0, 200));
+    return {};
+  }
+}
 
 function parseSubmitResponse(input: Record<string, unknown>): RouteParseResult {
   const routing = (input.routing as string) || "DRAFT";
   const text = (input.response_text as string) || "";
-  const confidence = (input.confidence as number) ?? 0.5;
+  // Kimi sometimes returns confidence as 0-100 instead of 0-1 — normalize
+  // and clamp so the DB CHECK constraint (0.00-1.00) always holds.
+  let confidence = (input.confidence as number) ?? 0.5;
+  if (confidence > 1) confidence = confidence / 100;
+  confidence = Math.min(1, Math.max(0, confidence));
   const subject = (input.subject as string) || null;
 
   let code: "DRAFT" | "IGNORE" | "ESCALATE" = "DRAFT";
@@ -1926,23 +1889,39 @@ async function executeCalendlyTool(
   }
 }
 
-// ── Claude call with retry/backoff ───────────────────────────────────────────
-// Wraps anthropic.messages.create with up to 3 attempts on transient failures
-// (529 overloaded, 529/503/500/502/504 server errors, 429 rate limit).
+// ── Kimi (Telnyx) call with retry/backoff ────────────────────────────────────
+// OpenAI-compatible chat completions with up to 3 attempts on transient failures
+// (429 rate limit, 500/502/503/504 server errors, network errors).
 // Sleeps 500ms → 1500ms between attempts. Non-retryable errors throw immediately.
-async function callClaudeWithRetry(anthropic: any, params: any): Promise<any> {
+async function callKimiWithRetry(params: Record<string, unknown>): Promise<any> {
   const delays = [500, 1500];
   let lastError: any;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      return await anthropic.messages.create(params);
+      const res = await fetch(KIMI_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${Deno.env.get("TELNYX_API_KEY")}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(params),
+      });
+      if (!res.ok) {
+        const status = res.status;
+        const errBody = await res.text();
+        const err: any = new Error(`Telnyx ${status}: ${errBody.slice(0, 300)}`);
+        err.status = status;
+        throw err;
+      }
+      return await res.json();
     } catch (err: any) {
       lastError = err;
-      const status = err?.status ?? err?.response?.status;
-      const retryable = status === 429 || status === 500 || status === 502 ||
-        status === 503 || status === 504 || status === 529;
+      const status = err?.status;
+      // status undefined = network/fetch failure — retryable
+      const retryable = status === undefined || status === 429 || status === 500 ||
+        status === 502 || status === 503 || status === 504;
       if (!retryable || attempt === 2) throw err;
-      console.warn(`Claude call failed with ${status}, retrying in ${delays[attempt]}ms (attempt ${attempt + 1}/3)`);
+      console.warn(`Kimi call failed with ${status ?? "network error"}, retrying in ${delays[attempt]}ms (attempt ${attempt + 1}/3)`);
       await new Promise((r) => setTimeout(r, delays[attempt]));
     }
   }

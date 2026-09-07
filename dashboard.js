@@ -8,7 +8,6 @@ let _supabase;
 let currentUser = null;   // Supabase Auth user
 let dashUser = null;      // Dashboard user record (includes role)
 let isOwner = false;
-let isTeamleader = false;
 
 const DEFAULT_ROUTING_RULES_TEXT = `Classify every response using the submit_response tool:
 - DRAFT — Normal inquiry you can answer. Set confidence 0.00–1.00 based on how sure you are.
@@ -75,20 +74,19 @@ async function onLogin(user) {
     const { user: du } = await api("me");
     dashUser = du;
     isOwner = du.role === "owner";
-    isTeamleader = du.role === "teamleader";
 
     // Show app, hide login
     document.getElementById("login-screen").style.display = "none";
     document.getElementById("app-screen").style.display = "";
 
     // Update UI for role
-    document.getElementById("user-display").innerHTML =
-      `<strong>${escHtml(du.display_name)}</strong><br>${du.role === "teamleader" ? "team leader" : du.role}`;
+    updateSidebarUser(du.display_name, du.role);
 
     document.getElementById("sales-nav-item").style.display = "";
     if (isOwner) {
       document.getElementById("team-nav-item").style.display = "";
     }
+    document.getElementById("section-manage").style.display = "";
 
     // Set up nav
     document.querySelectorAll(".nav-item[data-view]").forEach(el => {
@@ -115,9 +113,21 @@ function onLogout() {
   currentUser = null;
   dashUser = null;
   isOwner = false;
-  isTeamleader = false;
   document.getElementById("login-screen").style.display = "";
   document.getElementById("app-screen").style.display = "none";
+  document.getElementById("sales-nav-item").style.display = "none";
+  document.getElementById("team-nav-item").style.display = "none";
+  document.getElementById("section-manage").style.display = "none";
+}
+
+function formatRole(role) {
+  return role === "owner" ? "Admin" : role === "teamleader" ? "Team Leader" : "Salesperson";
+}
+
+function updateSidebarUser(name, role) {
+  document.getElementById("user-name").textContent = name;
+  document.getElementById("user-role").textContent = formatRole(role);
+  document.getElementById("user-initial").textContent = (name || "?").trim().charAt(0).toUpperCase();
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
@@ -148,6 +158,7 @@ function navigate(view, orgId = null, orgName = "", isDemo = false) {
   document.querySelectorAll(".nav-item[data-view]").forEach(el => {
     el.classList.toggle("active", el.dataset.view === view && !orgId);
   });
+  closeMobileSidebar();
   render();
 }
 
@@ -1114,7 +1125,7 @@ function renderWidgetTab(el, widget, org) {
     	apiKey: '${widget.api_key}'
   	};
 	<\/script>
-	<script src="https://horusdesk.com/widget.js" async><\/script>`;
+	<script src="https://ctr.horusdesk.com/widget.js" async><\/script>`;
 
   el.innerHTML = `
     <div class="card mb-4">
@@ -1162,7 +1173,7 @@ function renderWidgetTab(el, widget, org) {
           <label>Welcome Message</label>
           <textarea id="w-welcome" rows="2">${escHtml(widget.welcome_message || "")}</textarea>
         </div>
-        <button class="btn btn-primary" style="margin-top:16px" onclick="saveWidgetConfig('${widget.id}')">
+        <button class="btn btn-primary" style="margin-top:16px" onclick="saveWidgetConfig()">
           Save Widget Settings
         </button>
       </div>
@@ -1183,7 +1194,7 @@ function renderWidgetTab(el, widget, org) {
             <tbody>${colorRows}</tbody>
           </table>
         </div>
-        <button class="btn btn-primary" style="margin-top:16px" onclick="saveWidgetConfig('${widget.id}')">
+        <button class="btn btn-primary" style="margin-top:16px" onclick="saveWidgetConfig()">
           Save Widget Settings
         </button>
       </div>
@@ -1196,7 +1207,7 @@ function renderWidgetTab(el, widget, org) {
           <label>Allowed Domains <span class="hint">(comma-separated, empty = allow all)</span></label>
           <input type="text" id="w-domains" value="${escHtml(domains)}" placeholder="example.com, www.example.com" />
         </div>
-        <button class="btn btn-primary" style="margin-top:16px" onclick="saveWidgetConfig('${widget.id}')">
+        <button class="btn btn-primary" style="margin-top:16px" onclick="saveWidgetConfig()">
           Save Widget Settings
         </button>
       </div>
@@ -1233,7 +1244,7 @@ function renderWidgetTab(el, widget, org) {
               </label>`).join("")}
           </div>
         </div>
-        <button class="btn btn-primary" style="margin-top:16px" onclick="saveWidgetConfig('${widget.id}')">
+        <button class="btn btn-primary" style="margin-top:16px" onclick="saveWidgetConfig()">
           Save Widget Settings
         </button>
       </div>
@@ -1298,7 +1309,7 @@ async function toggleAutoSend(enabled) {
   } catch (e) { toast(e.message, "error"); }
 }
 
-async function saveWidgetConfig(widgetId) {
+async function saveWidgetConfig() {
   const colorFields = ["headerBg","headerText","userBubble","userText","aiBubble","aiText","bg","inputBg","inputText","sendBtn","sendBtnText"];
 
   const light = {}, dark = {};
@@ -1784,8 +1795,6 @@ async function disconnectCalendly() {
     toast(`Failed: ${e.message}`, "error");
   }
 }
-
-// ── Settings Tab ──────────────────────────────────────────────────────────────
 
 // ── Settings Tab ─────────────────────────────────────────────────────────────
 
@@ -3367,13 +3376,13 @@ async function loadTeamList() {
           ${team.map(m => {
             const isSelf = m.id === dashUser.id;
             const statusBadge = m.is_active
-              ? `<span style="color:var(--success);font-weight:600">Active</span>`
-              : `<span style="color:var(--danger);font-weight:600">Inactive</span>`;
+              ? `<span class="badge badge-green">Active</span>`
+              : `<span class="badge badge-gray">Inactive</span>`;
             const roleBadge = m.role === "owner"
-              ? `<span style="background:var(--gold);color:var(--bg);padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;text-transform:uppercase">Admin</span>`
+              ? `<span class="badge badge-cyan">Admin</span>`
               : m.role === "teamleader"
-              ? `<span style="background:var(--primary);color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;text-transform:uppercase">Team Leader</span>`
-              : `<span style="background:var(--surface-hover);padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;text-transform:uppercase">Salesperson</span>`;
+              ? `<span class="badge badge-blue">Team Leader</span>`
+              : `<span class="badge">Salesperson</span>`;
             return `<tr>
               <td><strong>${escHtml(m.display_name)}</strong>${isSelf ? ' <span style="color:var(--text-muted);font-size:11px">(you)</span>' : ""}</td>
               <td style="color:var(--text-muted)">${escHtml(m.email)}</td>
@@ -3508,9 +3517,7 @@ async function submitEditTeamMember(userId) {
       dashUser.display_name = displayName;
       dashUser.role = role;
       isOwner = role === "owner";
-      isTeamleader = role === "teamleader";
-      document.getElementById("user-display").innerHTML =
-        `<strong>${escHtml(displayName)}</strong><br>${role === "teamleader" ? "team leader" : role}`;
+      updateSidebarUser(displayName, role);
     }
     await loadTeamList();
   } catch (e) {
@@ -3543,10 +3550,83 @@ async function deleteTeamMember(userId, name) {
   }
 }
 
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+
+function closeMobileSidebar() {
+  document.getElementById("sidebar").classList.remove("mobile-open");
+  document.getElementById("sidebar-backdrop").classList.remove("show");
+}
+
+function initSidebar() {
+  const sidebar = document.getElementById("sidebar");
+  const backdrop = document.getElementById("sidebar-backdrop");
+
+  // Collapse to icon rail (desktop), persisted
+  if (localStorage.getItem("sidebarCollapsed") === "1") sidebar.classList.add("collapsed");
+  document.getElementById("sidebar-toggle").addEventListener("click", () => {
+    sidebar.classList.add("collapsed");
+    localStorage.setItem("sidebarCollapsed", "1");
+  });
+  document.getElementById("sidebar-expand").addEventListener("click", () => {
+    sidebar.classList.remove("collapsed");
+    localStorage.setItem("sidebarCollapsed", "0");
+  });
+
+  // Collapsible sections, persisted
+  document.querySelectorAll(".nav-section-header").forEach(header => {
+    const key = header.dataset.section;
+    const section = header.parentElement;
+    const saved = JSON.parse(localStorage.getItem("sidebarCollapsedSections") || "[]");
+    if (saved.includes(key)) section.classList.add("section-collapsed");
+    header.addEventListener("click", () => {
+      section.classList.toggle("section-collapsed");
+      const keys = JSON.parse(localStorage.getItem("sidebarCollapsedSections") || "[]");
+      const next = section.classList.contains("section-collapsed")
+        ? [...new Set([...keys, key])]
+        : keys.filter(k => k !== key);
+      localStorage.setItem("sidebarCollapsedSections", JSON.stringify(next));
+    });
+  });
+
+  // Tooltips on the collapsed icon rail
+  let tooltip = null;
+  document.querySelectorAll(".nav-item[data-label]").forEach(item => {
+    item.addEventListener("mouseenter", () => {
+      if (!sidebar.classList.contains("collapsed")) return;
+      const rect = item.getBoundingClientRect();
+      tooltip = document.createElement("div");
+      tooltip.className = "sidebar-tooltip";
+      tooltip.textContent = item.dataset.label;
+      tooltip.style.left = `${rect.right + 10}px`;
+      tooltip.style.top = `${rect.top + rect.height / 2}px`;
+      document.body.appendChild(tooltip);
+    });
+    item.addEventListener("mouseleave", () => { tooltip?.remove(); tooltip = null; });
+  });
+
+  // User menu popover
+  const userMenu = document.getElementById("user-menu");
+  document.getElementById("user-card").addEventListener("click", (e) => {
+    e.stopPropagation();
+    userMenu.style.display = userMenu.style.display === "none" ? "" : "none";
+  });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest(".sidebar-user")) userMenu.style.display = "none";
+  });
+
+  // Mobile drawer
+  document.getElementById("sidebar-fab").addEventListener("click", () => {
+    sidebar.classList.add("mobile-open");
+    backdrop.classList.add("show");
+  });
+  backdrop.addEventListener("click", closeMobileSidebar);
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 document.addEventListener("DOMContentLoaded", () => {
   _supabase = window.supabase.createClient(CONFIG.supabaseUrl, CONFIG.anonKey);
+  initSidebar();
 
   _supabase.auth.onAuthStateChange((event, session) => {
     if ((event === "SIGNED_IN" || event === "INITIAL_SESSION") && session && !currentUser) {

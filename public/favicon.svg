@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <!-- Eye outline -->
+  <path d="M20 100 Q100 40 180 100 Q100 160 20 100" stroke="#64FFDA" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <!-- Iris -->
+  <circle cx="100" cy="100" r="28" stroke="#64FFDA" stroke-width="3" fill="none"/>
+  <!-- Pupil -->
+  <circle cx="100" cy="100" r="12" fill="#64FFDA"/>
+  <!-- Eyebrow -->
+  <path d="M30 70 Q100 30 170 70" stroke="#64FFDA" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <!-- Left markings -->
+  <path d="M25 100 L8 85 M25 100 L8 100 M25 100 L8 115" stroke="#64FFDA" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+  <!-- Right markings -->
+  <path d="M175 100 L192 85 M175 100 L192 100 M175 100 L192 115" stroke="#64FFDA" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+  <!-- Vertical line -->
+  <path d="M100 128 L100 155 M82 145 L118 145" stroke="#64FFDA" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+  <!-- Spiral -->
+  <path d="M162 100 Q178 100 178 117 Q178 134 162 134 Q150 134 150 122" stroke="#64FFDA" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+</svg>

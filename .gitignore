@@ -1,8 +1,11 @@
 launch.sh
 launch.bat
 dist/
+node_modules/
+.env
 *.txt
 .DS_Store
 *.log
 .vscode/
 .idea/
+.claude/

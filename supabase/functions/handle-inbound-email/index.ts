@@ -133,7 +133,7 @@ async function processInboundEmail(
 
   // ── 2. LOAD ORGANIZATION CONFIG ────────────
   console.log("Looking up org ID:", payload.organization_id);
-  const { data: org, error: orgError } = await supabase // TEMP
+  const { data: org, error: orgError } = await supabase
     .schema("core").from("organizations")
     .select(`
       id,
@@ -182,8 +182,7 @@ async function processInboundEmail(
     .single();
 
   if (orgError || !org) {
-    console.log("Org query error:", orgError); // TEMP
-    console.log("Org data:", org ? "found" : "null"); // TEMP
+    console.error("Org query failed:", payload.organization_id, orgError?.message);
     throw new Error(`Organization not found: ${payload.organization_id}`);
   }
 
@@ -1285,9 +1284,7 @@ async function resolvePubSubNotification(
   // Fetch history since last known historyId
   // This returns only what changed since we last processed — avoids reprocessing
   const startHistoryId = provider.last_history_id ?? historyId;
-  console.log("startHistoryId:", startHistoryId, "notification historyId:", historyId); // TEMP
   const newMessages = await fetchGmailHistory(accessToken, startHistoryId);
-  console.log("fetchGmailHistory returned:", newMessages.length, "messages", newMessages); // TEMP
 
   if (newMessages.length === 0) {
     // Update historyId even if no new messages, so we stay current
@@ -1308,7 +1305,6 @@ async function resolvePubSubNotification(
         provider.organization_id
       );
       if (payload) payloads.push(payload);
-      console.log("fetchGmailMessage result for", messageId, ":", payload ? "got payload" : "null"); // TEMP
     } catch (e) {
       // Log but continue — don't let one bad message block the rest
       console.error(`Failed to fetch message ${messageId}:`, e.message);
@@ -2148,8 +2144,6 @@ async function getGmailAccessToken(
   }
 
   // Token expired or missing — refresh it
-  console.log("access_token_encrypted type:", typeof provider.access_token_encrypted); // TEMP
-  console.log("access_token_encrypted value:", String(provider.access_token_encrypted).slice(0, 50)); // TEMP
   const refreshToken = await decrypt(
     provider.refresh_token_encrypted as string,
     encryptionKey

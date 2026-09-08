@@ -84,14 +84,8 @@ Deno.serve(async (req: Request) => {
     
     if (!org_id) throw new Error('Invalid state parameter');
 
-    // DEBUG: Check env vars
     const supabaseUrl = Deno.env.get('SUPABASE_URL');
     const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-    
-    console.log('SUPABASE_URL exists:', !!supabaseUrl);
-    console.log('SUPABASE_SERVICE_ROLE_KEY exists:', !!serviceKey);
-    console.log('Key starts with eyJ:', serviceKey?.startsWith('eyJ'));
-    console.log('Organization ID:', org_id);
 
     if (!supabaseUrl || !serviceKey) {
       throw new Error('Missing environment variables');

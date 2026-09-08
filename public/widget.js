@@ -548,6 +548,25 @@
   function getStyles(config, isDarkMode) {
     const colors = isDarkMode && config.colors?.dark ? config.colors.dark : config.colors?.light || config.colors;
 
+    // True only when the tenant's DARK palette is actually in effect — not merely
+    // when the visitor's OS prefers dark. Input surfaces must follow the active
+    // palette; keying them off the OS causes dark-text-on-dark-field (or the
+    // reverse) whenever a tenant hasn't configured a matching OS theme.
+    const isDarkPalette = isDarkMode && !!config.colors?.dark;
+
+    // The input field pill must ALWAYS pair with inputText. Derive it from the
+    // tenant's own input colors (8% text over input-area bg) so any palette —
+    // dark, light, branded — stays readable. color-mix is supported by all
+    // browsers since 2023; fall back to palette-based grays otherwise.
+    const supportsColorMix = typeof CSS !== "undefined" &&
+      !!CSS.supports && CSS.supports("color", "color-mix(in srgb, red 10%, blue)");
+    const defaultFieldBg = supportsColorMix
+      ? "color-mix(in srgb, var(--horus-input-text) 8%, var(--horus-input-bg))"
+      : (isDarkPalette ? "#374151" : "#f3f4f6");
+    const placeholderColor = supportsColorMix
+      ? "color-mix(in srgb, var(--horus-input-text) 55%, transparent)"
+      : (isDarkPalette ? "#9ca3af" : "#6b7280");
+
     return `
       :host {
         --horus-header-bg: ${colors.headerBg || '#2563eb'};
@@ -559,6 +578,7 @@
         --horus-bg: ${colors.bg || '#ffffff'};
         --horus-input-bg: ${colors.inputBg || '#ffffff'};
         --horus-input-text: ${colors.inputText || '#1f2937'};
+        --horus-input-field-bg: ${colors.inputFieldBg || defaultFieldBg};
         --horus-send-btn: ${colors.sendBtn || '#2563eb'};
         --horus-send-btn-text: ${colors.sendBtnText || '#ffffff'};
         --horus-border: ${isDarkMode ? '#374151' : '#e5e7eb'};
@@ -870,7 +890,7 @@
 
       .horus-input {
         flex: 1;
-        background: ${isDarkMode ? '#374151' : '#f3f4f6'};
+        background: var(--horus-input-field-bg);
         border: 1px solid transparent;
         border-radius: 20px;
         padding: 10px 16px;
@@ -895,7 +915,7 @@
       }
 
       .horus-input::placeholder {
-        color: ${isDarkMode ? '#9ca3af' : '#6b7280'};
+        color: ${placeholderColor};
       }
 
       .horus-send-btn {

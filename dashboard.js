@@ -152,6 +152,7 @@ let currentTab = "overview";
 let currentIsDemo = false;
 
 function navigate(view, orgId = null, orgName = "", isDemo = false) {
+  document.getElementById("tchat-root")?.remove();
   currentView = view;
   currentOrgId = orgId;
   currentOrgName = orgName || (orgId ? _nameCache[orgId] || "" : "");
@@ -618,6 +619,7 @@ async function renderOrgDetail(main) {
       <div id="tab-content"></div>`;
 
     renderTab();
+    maybeMountTestChat(widget, kbDocs);
   } catch (e) {
     main.innerHTML += `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
   }
@@ -730,6 +732,7 @@ async function renderDemoDetail(main) {
       <div id="tab-content"></div>`;
 
     renderTab();
+    maybeMountTestChat(widget, kbDocs);
   } catch (e) {
     main.innerHTML += `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
   }
@@ -1491,6 +1494,115 @@ function updateWidgetPreview() {
     lightBtn.className = `btn btn-sm ${_widgetPreviewMode === "light" ? "btn-primary" : "btn-secondary"}`;
     darkBtn.className = `btn btn-sm ${_widgetPreviewMode === "dark" ? "btn-primary" : "btn-secondary"}`;
   }
+}
+
+// ── Test chat (employee AI playground) ───────────────────────────────────────
+// Floating widget on org/demo detail views, shown when the org has an active
+// KB version. Styled with the org's saved widget colors. Replies come from
+// dashboard-api test_chat → widget-chat test mode: the real AI pipeline runs,
+// but nothing is persisted and no credits/usage are consumed.
+
+let _testChat = { history: [], sending: false };
+
+const TCHAT_ICONS = {
+  chat: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="24" height="24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`,
+  avatar: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`,
+  send: `<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16"><path d="M2 21l21-9L2 3v7l15 2-15 2v7z"/></svg>`,
+  clear: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>`,
+  close: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="15" height="15"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
+};
+
+function maybeMountTestChat(widget, kbDocs) {
+  document.getElementById("tchat-root")?.remove();
+  if (!kbDocs || !kbDocs.length) return;
+  _testChat = { history: [], sending: false };
+  const root = document.createElement("div");
+  root.id = "tchat-root";
+  const c = widget?.colors?.light || {};
+  const varMap = {
+    "--horus-header-bg": c.headerBg, "--horus-header-text": c.headerText,
+    "--horus-user-bubble": c.userBubble, "--horus-user-text": c.userText,
+    "--horus-ai-bubble": c.aiBubble, "--horus-ai-text": c.aiText,
+    "--horus-bg": c.bg, "--horus-input-bg": c.inputBg, "--horus-input-text": c.inputText,
+    "--horus-send-btn": c.sendBtn, "--horus-send-btn-text": c.sendBtnText,
+  };
+  Object.entries(varMap).forEach(([k, v]) => { if (v) root.style.setProperty(k, v); });
+  root.innerHTML = `
+    <button class="tchat-fab" onclick="toggleTestChat()" title="Test the AI">${TCHAT_ICONS.chat}</button>
+    <div class="tchat-window" id="tchat-window">
+      <div class="tchat-header">
+        <span>${escHtml(widget?.header_title || "Chat with us")}</span>
+        <span class="tchat-header-btns">
+          <span class="tchat-test-pill">TEST</span>
+          <button onclick="clearTestChat()" title="Clear conversation">${TCHAT_ICONS.clear}</button>
+          <button onclick="toggleTestChat()" title="Close">${TCHAT_ICONS.close}</button>
+        </span>
+      </div>
+      <div class="tchat-messages" id="tchat-messages"></div>
+      <div class="tchat-input-area">
+        <input class="tchat-input" id="tchat-input" placeholder="Type a test message…" maxlength="2000"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();sendTestChat();}">
+        <button class="tchat-send" id="tchat-send" onclick="sendTestChat()">${TCHAT_ICONS.send}</button>
+      </div>
+      <div class="tchat-footer">Test mode — no credits used, nothing saved</div>
+    </div>`;
+  document.body.appendChild(root);
+  renderTestChatMessages();
+}
+
+function toggleTestChat() {
+  const win = document.getElementById("tchat-window");
+  if (!win) return;
+  win.classList.toggle("open");
+  if (win.classList.contains("open")) {
+    document.getElementById("tchat-input")?.focus();
+  }
+}
+
+function clearTestChat() {
+  _testChat.history = [];
+  renderTestChatMessages();
+}
+
+function renderTestChatMessages() {
+  const box = document.getElementById("tchat-messages");
+  if (!box) return;
+  const welcome = window._orgData?.widget?.welcome_message || "Hi there! How can I help you today?";
+  let html = `<div class="tchat-msg ai"><div class="tchat-avatar">${TCHAT_ICONS.avatar}</div><div class="tchat-bubble">${escHtml(welcome)}</div></div>`;
+  for (const m of _testChat.history) {
+    if (m.role === "user") {
+      html += `<div class="tchat-msg user"><div class="tchat-bubble">${escHtml(m.content)}</div></div>`;
+    } else {
+      html += `<div class="tchat-msg ai"><div class="tchat-avatar">${TCHAT_ICONS.avatar}</div><div class="tchat-bubble">${escHtml(m.content)}${m.escalated ? `<span class="tchat-flag">⚠ AI would escalate${m.escalation_type ? ` (${escHtml(m.escalation_type)})` : ""}</span>` : ""}</div></div>`;
+    }
+  }
+  if (_testChat.sending) {
+    html += `<div class="tchat-msg ai"><div class="tchat-avatar">${TCHAT_ICONS.avatar}</div><div class="tchat-bubble tchat-typing"><span></span><span></span><span></span></div></div>`;
+  }
+  box.innerHTML = html;
+  box.scrollTop = box.scrollHeight;
+}
+
+async function sendTestChat() {
+  const input = document.getElementById("tchat-input");
+  const text = (input?.value || "").trim();
+  if (!text || _testChat.sending) return;
+  _testChat.sending = true;
+  input.value = "";
+  _testChat.history.push({ role: "user", content: text });
+  renderTestChatMessages();
+  try {
+    const resp = await api("test_chat", {
+      org_id: currentOrgId,
+      message: text,
+      history: _testChat.history.slice(0, -1),
+    });
+    _testChat.history.push({ role: "assistant", content: resp.message, escalated: resp.escalated, escalation_type: resp.escalation_type });
+  } catch (e) {
+    _testChat.history.push({ role: "assistant", content: `⚠ ${e.message}` });
+  }
+  _testChat.sending = false;
+  renderTestChatMessages();
 }
 
 async function toggleWidget(enabled) {

@@ -390,6 +390,37 @@
           return ok({ success: true });
         }
 
+        // ── Test chat (employee AI playground) ──────────────────────────────
+        // Proxies to widget-chat's test mode with the service key. The real AI
+        // pipeline runs (org config, KB, prompt, Kimi) but nothing persists and
+        // no usage/credits are consumed. History is client-supplied, bounded.
+        case "test_chat": {
+          const { org_id, message, history } = body as {
+            org_id: string; message: string; history?: Array<{ role: string; content: string }>;
+          };
+          if (!org_id || !String(message || "").trim()) {
+            return err("Missing org_id or message", 400);
+          }
+          await assertOrgAccess(adminClient, dashUser, org_id);
+
+          const res = await fetch(`${SUPA_URL}/functions/v1/widget-chat`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${SUPA_SERVICE_KEY}`,
+            },
+            body: JSON.stringify({
+              test_mode: true,
+              org_id,
+              message: String(message).slice(0, 2000),
+              history: Array.isArray(history) ? history.slice(-20) : [],
+            }),
+          });
+          const payload = await res.json().catch(() => ({}));
+          if (!res.ok) return err(payload.error || "Test chat failed", res.status);
+          return ok(payload);
+        }
+
         // ── Create org ──────────────────────────────────────────────────────
         case "create_org": {
           const { name, slug, ai_tone, message_limit_per_month, auto_send_min_confidence, subscription_tier, subscription_plan } = body;

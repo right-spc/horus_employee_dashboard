@@ -88,11 +88,20 @@ Deno.serve(async (req: Request) => {
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
   );
 
-  let body: ChatRequest;
-  try {
-    body = await req.json();
-  } catch {
+  const bodyText = await req.json().catch(() => null);
+  if (!bodyText) {
     return errorResponse("Invalid JSON", 400, "*");
+  }
+  const body = bodyText as ChatRequest;
+
+  // ── EMPLOYEE TEST MODE ────────────────────
+  // Server-to-server only: dashboard-api proxies employee playground requests
+  // here with the service key. Runs the real AI pipeline (org config, KB,
+  // system prompt, Kimi) but skips: API-key/widget checks, rate limits, usage
+  // counters, identity/conversation/message persistence, calendar tools, and
+  // escalation side-effects. Employee testing never touches client usage.
+  if ((body as unknown as Record<string, unknown>).test_mode === true) {
+    return await handleTestChat(req, supabase, body as unknown as Record<string, unknown>);
   }
 
   const { apiKey, sessionId, visitorData, message, metadata } = body;
@@ -901,6 +910,139 @@ async function loadAllKbChunks(
     result.push({ content: text });
   }
   return result;
+}
+
+// ── Employee test chat (playground) ──────────────────────────────────────────
+// Reached only via the test_mode branch in the main handler. Service-key
+// authenticated (server-to-server from dashboard-api). Same org config load,
+// KB injection, system prompt and Kimi call as the live path — but nothing is
+// persisted and no usage/credits are consumed.
+async function handleTestChat(
+  req: Request,
+  supabase: ReturnType<typeof createClient>,
+  body: Record<string, unknown>,
+): Promise<Response> {
+  const auth = req.headers.get("authorization") || "";
+  if (auth !== `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`) {
+    return errorResponse("Unauthorized", 401, "*");
+  }
+
+  const orgId = (body.org_id ?? body.organization_id) as string | undefined;
+  const message = String(body.message ?? "").trim();
+  if (!orgId || !message) return errorResponse("Missing org_id or message", 400, "*");
+  if (message.length > 2000) return errorResponse("Message too long (max 2000 chars)", 400, "*");
+
+  // Client-supplied conversation history, bounded and sanitized.
+  const rawHistory = Array.isArray(body.history) ? body.history : [];
+  const history = (rawHistory as Array<Record<string, unknown>>)
+    .filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
+    .slice(-20)
+    .map((m) => ({ role: m.role as string, content: (m.content as string).slice(0, 2000) }));
+
+  // Same org config load as the live path
+  const { data: org, error: orgError } = await supabase
+    .schema("core").from("organizations")
+    .select(`
+      id,
+      ai_tone,
+      auto_send_enabled,
+      auto_send_min_confidence,
+      subscription_end_date,
+      ai_system_prompt,
+      ai_system_prompt_version,
+      business_hours_timezone,
+      business_profiles (
+        business_name,
+        description,
+        booking_url,
+        booking_instructions,
+        cancellation_policy,
+        deposit_policy
+      ),
+      business_hours (
+        day_of_week,
+        is_open,
+        open_time,
+        close_time,
+        note
+      ),
+      business_services (
+        name,
+        description,
+        category,
+        price_type,
+        price_min_cents,
+        price_max_cents,
+        duration_minutes,
+        is_active
+      )
+    `)
+    .eq("id", orgId)
+    .single();
+
+  if (orgError || !org) {
+    return errorResponse("Organization not found", 404, "*");
+  }
+
+  const kbChunks = await loadAllKbChunks(supabase, orgId);
+
+  const systemPrompt = buildSystemPrompt({
+    org,
+    kbChunks: kbChunks ?? [],
+    isStaleConversation: false,
+    daysSinceLastMessage: 0,
+    visitorData: undefined,
+    isWebchat: true,
+    // No calendar tools in test mode — booking tools perform real writes.
+    calendlyConnected: false,
+    googleCalendarAvailable: false,
+    customerTimezone: undefined,
+  });
+
+  const kimiMessages: Array<Record<string, unknown>> = [
+    { role: "system", content: systemPrompt },
+    ...history,
+    { role: "user", content: message },
+  ];
+
+  const kimiResponse = await callKimiWithRetry({
+    model: KIMI_MODEL,
+    max_tokens: 2000,
+    reasoning_effort: REASONING_EFFORT,
+    messages: kimiMessages,
+    tools: [SUBMIT_RESPONSE_TOOL],
+    tool_choice: "required",
+  });
+
+  const rawText = (kimiResponse.choices?.[0]?.message?.content as string) ?? "";
+  const toolCalls = (kimiResponse.choices?.[0]?.message?.tool_calls ?? []) as Array<Record<string, unknown>>;
+  const submitCall = toolCalls.find(
+    (t) => (t.function as Record<string, unknown>)?.name === "submit_response"
+  );
+
+  const parsed: RouteParseResult = submitCall
+    ? parseSubmitResponse(parseToolArguments((submitCall.function as Record<string, unknown>)?.arguments as string | undefined))
+    : parseClaudeResponse(rawText);
+
+  if (!parsed.response_text?.trim()) {
+    parsed.response_text = "I've looked into that for you. Could you tell me a bit more about what you need so I can help further?";
+    parsed.confidence = 0.50;
+  }
+
+  // Webchat routing parity: IGNORE never reaches a live visitor
+  const responseText = parsed.code === "IGNORE"
+    ? (parsed.response_text || "I'm not sure I understood that. Could you rephrase?")
+    : parsed.response_text;
+
+  return jsonResponse({
+    message: responseText,
+    quickReplies: [],
+    escalated: parsed.code === "ESCALATE",
+    confidence: parsed.confidence,
+    escalation_type: parsed.escalation_type,
+    lead_priority: parsed.lead_priority,
+    sessionId: "test",
+  }, 200, "*");
 }
 
 interface RouteParseResult {

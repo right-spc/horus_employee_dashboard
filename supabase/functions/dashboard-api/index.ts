@@ -34,7 +34,7 @@
   // Table → schema lookup for the dynamic delete loops (tables moved out of public 2026-09-07).
   const TABLE_SCHEMA: Record<string, string> = {
     organizations: "core", organization_members: "core", dashboard_users: "core", customer_users: "core", widget_configs: "core", demo_defaults: "core",
-    clients: "core", client_members: "core",
+    clients: "core", client_members: "core", org_notes: "core",
     contacts: "crm", contact_aliases: "crm",
     conversations: "messaging", messages: "messaging", conversation_merges: "messaging", delivery_queue: "messaging", widget_surveys: "messaging",
     kb_amend_requests: "kb", kb_versions: "kb",
@@ -257,6 +257,7 @@
             { data: providers },
             { data: widget },
             { data: lastPayment },
+            { data: notes },
           ] = await Promise.all([
             adminClient.schema("core").from("organizations").select("*").eq("id", org_id).single(),
             adminClient.schema("comms").from("email_providers").select("*").eq("organization_id", org_id),
@@ -268,9 +269,50 @@
               .order("created_at", { ascending: false })
               .limit(1)
               .maybeSingle(),
+            adminClient.schema("core").from("org_notes")
+              .select("id, body, created_by, created_by_name, created_at")
+              .eq("organization_id", org_id)
+              .order("created_at", { ascending: false })
+              .limit(100),
           ]);
 
           if (orgErr) throw orgErr;
+
+          // Conversation stats for the current billing cycle (counts only, never
+          // content). Cycle resets on cycle_anchor_day (fallback: billing day).
+          const resetDay = Number(org?.cycle_anchor_day ?? org?.billing_day_of_month ?? 1) || 1;
+          const nowUtc = new Date();
+          const cycleStart = nowUtc.getUTCDate() >= resetDay
+            ? new Date(Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), resetDay))
+            : new Date(Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth() - 1, resetDay));
+          const cycleStartIso = cycleStart.toISOString();
+          const convCount = (channel: string) =>
+            adminClient.schema("messaging").from("conversations")
+              .select("id", { count: "exact", head: true })
+              .eq("organization_id", org_id)
+              .eq("channel", channel)
+              .gte("created_at", cycleStartIso);
+          const [{ count: webchatCount }, { count: emailCount }] = await Promise.all([
+            convCount("webchat"),
+            convCount("email"),
+          ]);
+          const conversationStats = {
+            cycle_start: cycleStartIso,
+            reset_day: resetDay,
+            webchat: webchatCount ?? 0,
+            email: emailCount ?? 0,
+          };
+
+          // Linked client (identity line on the Overview tab)
+          let client: { id: string; name: string } | null = null;
+          if (org?.client_id) {
+            const { data: clientRow } = await adminClient
+              .schema("core").from("clients")
+              .select("id, name")
+              .eq("id", org.client_id)
+              .maybeSingle();
+            client = clientRow;
+          }
 
           // kbDocs shim: the org now has ONE whole-KB version history. Expose
           // the active version as a single pseudo-document so the existing KB
@@ -294,7 +336,58 @@
             }
           }
 
-          return ok({ org, providers: providers || [], widget, kbDocs, lastPayment });
+          return ok({ org, providers: providers || [], widget, kbDocs, lastPayment, conversationStats, client, notes: notes || [] });
+        }
+
+        // ── Add org note (account history) ──────────────────────────────────
+        case "add_org_note": {
+          const { org_id, body: noteBody } = body;
+          if (!org_id) return err("Missing org_id", 400);
+          const text = String(noteBody || "").trim();
+          if (!text) return err("Note cannot be empty", 400);
+          if (text.length > 2000) return err("Note too long (max 2000 chars)", 400);
+
+          await assertOrgAccess(adminClient, dashUser, org_id as string);
+
+          const { data: note, error: noteErr } = await adminClient
+            .schema("core").from("org_notes")
+            .insert({
+              organization_id: org_id,
+              body: text,
+              created_by: dashUser.id,
+              created_by_name: dashUser.display_name || null,
+            })
+            .select("id, body, created_by, created_by_name, created_at")
+            .single();
+          if (noteErr) throw noteErr;
+          return ok({ note });
+        }
+
+        // ── Delete org note (author or owner) ───────────────────────────────
+        case "delete_org_note": {
+          const { org_id, note_id } = body;
+          if (!org_id || !note_id) return err("Missing org_id or note_id", 400);
+
+          await assertOrgAccess(adminClient, dashUser, org_id as string);
+
+          const { data: note, error: fetchErr } = await adminClient
+            .schema("core").from("org_notes")
+            .select("id, created_by")
+            .eq("id", note_id)
+            .eq("organization_id", org_id)
+            .maybeSingle();
+          if (fetchErr) throw fetchErr;
+          if (!note) return err("Note not found", 404);
+          if (!isOwner && note.created_by !== dashUser.id) {
+            return err("Only the author or an owner can delete a note", 403);
+          }
+
+          const { error: delErr } = await adminClient
+            .schema("core").from("org_notes")
+            .delete()
+            .eq("id", note_id);
+          if (delErr) throw delErr;
+          return ok({ success: true });
         }
 
         // ── Create org ──────────────────────────────────────────────────────
@@ -817,77 +910,6 @@
 
           if (error) throw error;
           return ok({ orgs: data });
-        }
-
-        // ── List notification recipients ────────────────────────────────────
-        case "list_recipients": {
-          const { org_id } = body;
-          if (!org_id) return err("Missing org_id", 400);
-          await assertOrgAccess(adminClient, dashUser, org_id as string);
-
-          const { data, error } = await adminClient
-            .schema("comms").from("notification_recipients")
-            .select("id, email, name, notify_on, is_active")
-            .eq("organization_id", org_id)
-            .order("created_at", { ascending: true });
-
-          if (error) throw error;
-          return ok({ recipients: data });
-        }
-
-        // ── Add notification recipient ───────────────────────────────────────
-        case "add_recipient": {
-          const { org_id, email, name, notify_on } = body;
-          if (!org_id || !email) return err("Missing org_id or email", 400);
-          await assertOrgAccess(adminClient, dashUser, org_id as string);
-
-          const { data, error } = await adminClient
-            .schema("comms").from("notification_recipients")
-            .insert({
-              organization_id: org_id,
-              email,
-              name: name || null,
-              notify_on: notify_on || ["escalation", "usage_limit", "system"],
-            })
-            .select("id, email, name, notify_on, is_active")
-            .single();
-
-          if (error) throw error;
-          return ok({ recipient: data });
-        }
-
-        // ── Update notification recipient ────────────────────────────────────
-        case "update_recipient": {
-          const { org_id, recipient_id, updates } = body as {
-            org_id: string; recipient_id: string; updates: Record<string, unknown>;
-          };
-          if (!org_id || !recipient_id) return err("Missing org_id or recipient_id", 400);
-          await assertOrgAccess(adminClient, dashUser, org_id);
-
-          const { error } = await adminClient
-            .schema("comms").from("notification_recipients")
-            .update(updates)
-            .eq("id", recipient_id)
-            .eq("organization_id", org_id);
-
-          if (error) throw error;
-          return ok({ success: true });
-        }
-
-        // ── Delete notification recipient ────────────────────────────────────
-        case "delete_recipient": {
-          const { org_id, recipient_id } = body;
-          if (!org_id || !recipient_id) return err("Missing org_id or recipient_id", 400);
-          await assertOrgAccess(adminClient, dashUser, org_id as string);
-
-          const { error } = await adminClient
-            .schema("comms").from("notification_recipients")
-            .delete()
-            .eq("id", recipient_id)
-            .eq("organization_id", org_id as string);
-
-          if (error) throw error;
-          return ok({ success: true });
         }
 
         // ── Message export: on-demand ───────────────────────────────────────

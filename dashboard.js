@@ -588,8 +588,8 @@ async function renderOrgDetail(main) {
     <div class="loading-overlay"><div class="spinner"></div> Loading...</div>`;
 
   try {
-    const { org, providers, widget, kbDocs, lastPayment, integrations } = await api("get_org", { org_id: currentOrgId });
-    window._orgData = { org, providers, widget, kbDocs, lastPayment, integrations };
+    const { org, providers, widget, kbDocs, lastPayment, integrations, conversationStats, client, notes } = await api("get_org", { org_id: currentOrgId });
+    window._orgData = { org, providers, widget, kbDocs, lastPayment, integrations, conversationStats, client, notes };
 
     main.innerHTML = `
       <div class="breadcrumb">
@@ -608,8 +608,7 @@ async function renderOrgDetail(main) {
       </div>
       <div class="tabs">
         <button class="tab active" onclick="switchTab('overview')">Overview</button>
-        <button class="tab" onclick="switchTab('email')">Email Setup</button>
-        <button class="tab" onclick="switchTab('widget')">Widget</button>
+        <button class="tab" onclick="switchTab('channels')">Channels</button>
         <button class="tab" onclick="switchTab('kb')">Knowledge Base</button>
         <button class="tab" onclick="switchTab('integrations')">Integrations</button>
         <button class="tab" onclick="switchTab('payments')">Payments</button>
@@ -701,8 +700,8 @@ async function renderDemoDetail(main) {
     <div class="loading-overlay"><div class="spinner"></div> Loading...</div>`;
 
   try {
-    const { org, providers, widget, kbDocs, lastPayment, integrations } = await api("get_org", { org_id: currentOrgId });
-    window._orgData = { org, providers, widget, kbDocs, lastPayment, integrations };
+    const { org, providers, widget, kbDocs, lastPayment, integrations, conversationStats, client, notes } = await api("get_org", { org_id: currentOrgId });
+    window._orgData = { org, providers, widget, kbDocs, lastPayment, integrations, conversationStats, client, notes };
 
     main.innerHTML = `
       <div class="breadcrumb">
@@ -723,9 +722,8 @@ async function renderDemoDetail(main) {
       </div>
       <div class="tabs">
         <button class="tab active" onclick="switchTab('overview')">Overview</button>
-        <button class="tab" onclick="switchTab('widget')">Widget</button>
+        <button class="tab" onclick="switchTab('channels')">Channels</button>
         <button class="tab" onclick="switchTab('kb')">Knowledge Base</button>
-        <button class="tab" onclick="switchTab('notifications')">Notifications</button>
         <button class="tab" onclick="switchTab('reports')">Reports</button>
         <button class="tab" onclick="switchTab('settings')">Settings</button>
       </div>
@@ -742,8 +740,8 @@ async function resetDemo() {
   try {
     await api("reset_demo", { org_id: currentOrgId });
     toast("Demo reset to defaults", "success");
-    const { org, providers, widget, kbDocs, lastPayment, integrations } = await api("get_org", { org_id: currentOrgId });
-    window._orgData = { org, providers, widget, kbDocs, lastPayment, integrations };
+    const { org, providers, widget, kbDocs, lastPayment, integrations, conversationStats, client, notes } = await api("get_org", { org_id: currentOrgId });
+    window._orgData = { org, providers, widget, kbDocs, lastPayment, integrations, conversationStats, client, notes };
     currentOrgName = org.name;
     await renderDemoDetail(document.getElementById("main"));
   } catch (e) { toast(e.message, "error"); }
@@ -759,7 +757,7 @@ async function saveDemoDefaults() {
 
 async function deleteDemo() {
   if (!confirm(`Permanently delete demo "${currentOrgName}"? This cannot be undone.`)) return;
-  if (!confirm("Are you sure? All conversations, KB documents, widget config, and notification recipients for this demo will be removed.")) return;
+  if (!confirm("Are you sure? All conversations, KB documents, and widget config for this demo will be removed.")) return;
   try {
     await api("delete_demo", { org_id: currentOrgId });
     toast("Demo deleted", "success");
@@ -778,9 +776,9 @@ async function deleteOrg() {
     `This will remove ALL of the following for this organization:\n` +
     `  • All conversations and messages\n` +
     `  • All contacts\n` +
-    `  • All KB documents and chunks\n` +
+    `  • All KB documents\n` +
     `  • Connected email provider and tokens\n` +
-    `  • Widget config and notification recipients\n` +
+    `  • Widget config\n` +
     `  • Payment history and analytics\n\n` +
     `This cannot be undone.`;
   if (!confirm(warning)) return;
@@ -881,8 +879,8 @@ async function applyTemplate(mode) {
     toast(`Template applied (${mode === "kb" ? "KB documents" : "system prompt"}, widget colors, AI tone)`, "success");
 
     // Refresh org data and re-render current tab
-    const { org, providers, widget, kbDocs, lastPayment, integrations } = await api("get_org", { org_id: currentOrgId });
-    window._orgData = { org, providers, widget, kbDocs, lastPayment, integrations };
+    const { org, providers, widget, kbDocs, lastPayment, integrations, conversationStats, client, notes } = await api("get_org", { org_id: currentOrgId });
+    window._orgData = { org, providers, widget, kbDocs, lastPayment, integrations, conversationStats, client, notes };
     renderTab();
   } catch (e) {
     document.getElementById("template-error").innerHTML =
@@ -903,15 +901,13 @@ function switchTab(tab) {
 async function renderTab() {
   const el = document.getElementById("tab-content");
   if (!el) return;
-  const { org, providers, widget, kbDocs, lastPayment, integrations } = window._orgData;
+  const { org, providers, widget, kbDocs, lastPayment, integrations, conversationStats, client, notes } = window._orgData;
 
   try {
-    if (currentTab === "overview") renderOverviewTab(el, org, providers, widget, lastPayment);
-    else if (currentTab === "email") renderEmailTab(el, org, providers);
-    else if (currentTab === "widget") renderWidgetTab(el, widget, org);
+    if (currentTab === "overview") renderOverviewTab(el, org, providers, widget, lastPayment, conversationStats, client, kbDocs, notes);
+    else if (currentTab === "channels") renderChannelsTab(el, org, providers, widget);
     else if (currentTab === "kb") renderKbTab(el, kbDocs, org);
     else if (currentTab === "integrations") renderIntegrationsTab(el, org, integrations, providers);
-    else if (currentTab === "notifications") renderNotificationsTab(el, org);
     else if (currentTab === "payments") renderPaymentsTab(el, org);
     else if (currentTab === "reports") renderReportsTab(el, org);
     else if (currentTab === "settings") renderSettingsTab(el, org);
@@ -923,31 +919,90 @@ async function renderTab() {
 
 // ── Overview Tab ──────────────────────────────────────────────────────────────
 
-function renderOverviewTab(el, org, providers, widget, lastPayment) {
-  const pct = org.message_limit_per_month > 0
-    ? Math.round((org.messages_used_this_month / org.message_limit_per_month) * 100) : 0;
+function renderOverviewTab(el, org, providers, widget, lastPayment, conversationStats, client, kbDocs, notes) {
+  const limit = org.message_limit_per_month || 0;
+  const used = org.messages_used_this_month || 0;
+  const remaining = Math.max(0, limit - used);
+  const pct = limit > 0 ? Math.round((used / limit) * 100) : 0;
   const fillClass = pct >= 100 ? "danger" : pct >= 80 ? "warning" : "";
   const provider = providers[0];
-  const cycleDay = org.subscription_end_date
-    ? new Date(org.subscription_end_date).getUTCDate()
-    : (org.billing_day_of_month || 1);
+  const resetDay = conversationStats?.reset_day || org.cycle_anchor_day || org.billing_day_of_month || 1;
   const now = new Date();
-  const resetDateObj = now.getDate() < cycleDay
-    ? new Date(now.getFullYear(), now.getMonth(), cycleDay)
-    : new Date(now.getFullYear(), now.getMonth() + 1, cycleDay);
+  const resetDateObj = now.getDate() < resetDay
+    ? new Date(now.getFullYear(), now.getMonth(), resetDay)
+    : new Date(now.getFullYear(), now.getMonth() + 1, resetDay);
   const resetDate = resetDateObj.toLocaleDateString("en-US", { month: "long", day: "numeric" });
 
+  const reasonLabels = {
+    pending_activation: "Pending activation",
+    usage_limit: "Paused — credit limit reached",
+    manual: "Manually disabled",
+    subscription_expired: "Subscription expired",
+    emergency: "Suspended by support",
+  };
+  const widgetStatus = !widget
+    ? { text: "Not set up", cls: "badge-yellow" }
+    : widget.enabled
+      ? { text: "Enabled", cls: "badge-green" }
+      : { text: reasonLabels[widget.disable_reason] || "Disabled", cls: "badge-red" };
+
+  const conv = conversationStats || { webchat: 0, email: 0 };
+  const convTotal = (conv.webchat || 0) + (conv.email || 0);
+
   el.innerHTML = `
-    <div class="stat-grid">
-      <div class="stat-card">
-        <div class="stat-label">Messages Used</div>
-        <div class="stat-value">${org.messages_used_this_month.toLocaleString()}</div>
-        <div class="stat-sub">of ${org.message_limit_per_month.toLocaleString()} / month</div>
+    <div class="card mb-4">
+      <div class="card-header"><div class="card-title">Services</div></div>
+      <div class="card-body">
+        <div class="toggle-row">
+          <div>
+            <div class="toggle-label">Website Chat</div>
+            <div class="toggle-desc"><span class="badge ${widgetStatus.cls}">${widgetStatus.text}</span> · ${conv.webchat.toLocaleString()} conversations this cycle</div>
+          </div>
+        </div>
+        ${!currentIsDemo ? `<div class="toggle-row">
+          <div>
+            <div class="toggle-label">Email</div>
+            <div class="toggle-desc">${provider
+              ? `${escHtml(provider.provider_account_email)} · <span class="badge ${provider.status === "active" ? "badge-green" : "badge-red"}">${escHtml(provider.status)}</span>${org.ai_responses_enabled ? "" : " · AI responses off"} · ${conv.email.toLocaleString()} conversations this cycle`
+              : "Not connected — set up in the Email tab"}</div>
+          </div>
+        </div>` : ""}
+        <div style="border-top:1px solid var(--border);padding-top:14px;margin-top:2px">
+          ${org.limit_exceeded_at ? `<div class="alert alert-danger">Credit limit reached on ${new Date(org.limit_exceeded_at).toLocaleDateString()} — services are paused until the cycle resets.</div>` : ""}
+          <div class="progress-wrap" style="margin-bottom:6px">
+            <div class="progress-bar" style="height:10px">
+              <div class="progress-fill ${fillClass}" style="width:${Math.min(pct, 100)}%"></div>
+            </div>
+            <span class="progress-label font-semibold">${pct}%</span>
+          </div>
+          <div class="text-muted" style="font-size:13px">
+            ${remaining.toLocaleString()} of ${limit.toLocaleString()} credits remaining · resets ${resetDate}
+          </div>
+        </div>
       </div>
+    </div>
+    <div class="stat-grid">
+      ${!currentIsDemo ? (() => {
+        const st = org.subscription_status || "unknown";
+        const stBadge = st === "active" ? "badge-green" : (st === "trialing" || st === "past_due") ? "badge-yellow" : "badge-red";
+        const plan = org.subscription_plan ? org.subscription_plan[0].toUpperCase() + org.subscription_plan.slice(1) : "—";
+        return `<div class="stat-card">
+          <div class="stat-label">Subscription</div>
+          <div class="stat-value stat-value-md"><span class="badge ${stBadge}">${escHtml(st)}</span></div>
+          <div class="stat-sub">${plan} plan</div>
+        </div>`;
+      })() : ""}
+      ${!currentIsDemo ? `<div class="stat-card">
+        <div class="stat-label">Renewal</div>
+        <div class="stat-value stat-value-md">${org.subscription_end_date
+          ? new Date(org.subscription_end_date).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })
+          : "—"}</div>
+        <div class="stat-sub">Current period ends</div>
+      </div>` : ""}
       <div class="stat-card">
-        <div class="stat-label">Resets</div>
-        <div class="stat-value stat-value-md">${resetDate}</div>
-        <div class="stat-sub">Next billing cycle</div>
+        <div class="stat-label">Conversations This Cycle</div>
+        <div class="stat-value">${convTotal.toLocaleString()}</div>
+        <div class="stat-sub">${conv.webchat.toLocaleString()} webchat · ${conv.email.toLocaleString()} email</div>
       </div>
       ${!currentIsDemo ? (() => {
         if (!lastPayment) {
@@ -969,70 +1024,97 @@ function renderOverviewTab(el, org, providers, widget, lastPayment) {
           <div class="stat-sub"><span class="badge ${badgeClass}">${cmp} billing date</span></div>
         </div>`;
       })() : ""}
-      ${!currentIsDemo ? `<div class="stat-card">
-        <div class="stat-label">Email</div>
-        <div class="stat-value stat-value-sm" style="word-break:break-all;line-height:1.4">${provider ? (() => { const at = provider.provider_account_email.indexOf("@"); return at === -1 ? escHtml(provider.provider_account_email) : `${escHtml(provider.provider_account_email.slice(0, at))}<br><span style="font-size:12px;opacity:0.8">${escHtml(provider.provider_account_email.slice(at))}</span>`; })() : "—"}</div>
-        <div class="stat-sub">${provider ? `<span class="badge ${provider.status === "active" ? "badge-green" : "badge-red"}">${provider.status}</span>` : "Not connected"}</div>
-      </div>` : ""}
       <div class="stat-card">
-        <div class="stat-label">Widget</div>
-        <div class="stat-value stat-value-lg">${widget ? (widget.enabled ? "Enabled" : "Disabled") : "Not set up"}</div>
+        <div class="stat-label">Knowledge Base</div>
+        <div class="stat-value stat-value-md">${kbDocs?.[0] ? `v${kbDocs[0].version}` : "—"}</div>
+        <div class="stat-sub">${kbDocs?.[0]
+          ? `Updated ${new Date(kbDocs[0].created_at).toLocaleDateString("en-US", { month: "long", day: "numeric" })}`
+          : "No KB yet"}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Member Since</div>
+        <div class="stat-value stat-value-md">${org.created_at
+          ? new Date(org.created_at).toLocaleDateString("en-US", { month: "long", year: "numeric" })
+          : "—"}</div>
+        <div class="stat-sub">${org.created_by_name ? `Created by ${escHtml(org.created_by_name)}` : ""}</div>
       </div>
     </div>
-    ${isOwner ? `
-    <div class="card mb-4">
-      <div class="card-header"><div class="card-title">Activation Controls</div></div>
-      <div class="card-body">
-        <div class="toggle-row">
-          <div>
-            <div class="toggle-label">Widget Chat</div>
-            <div class="toggle-desc">Show chat widget on the business website</div>
-          </div>
-          <label class="toggle">
-            <input type="checkbox" id="ov-widget-toggle" ${widget?.enabled ? "checked" : ""}
-              onchange="toggleWidget(this.checked)">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-        ${!currentIsDemo ? `<div class="toggle-row">
-          <div>
-            <div class="toggle-label">Email AI Responses</div>
-            <div class="toggle-desc">Process inbound emails with AI (disable to save messages without AI)</div>
-          </div>
-          <label class="toggle">
-            <input type="checkbox" id="ov-email-ai-toggle" ${org.ai_responses_enabled ? "checked" : ""}
-              onchange="toggleEmailAi(this.checked)">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>` : ""}
-        <div class="toggle-row" style="border-bottom:none">
-          <div>
-            <div class="toggle-label">Auto-Send</div>
-            <div class="toggle-desc">Automatically send high-confidence AI responses</div>
-          </div>
-          <label class="toggle">
-            <input type="checkbox" id="ov-autosend-toggle" ${org.auto_send_enabled ? "checked" : ""}
-              onchange="toggleAutoSend(this.checked)">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-      </div>
+    ${!currentIsDemo ? `<div class="text-muted" style="font-size:13px;margin-top:12px">
+      Client: ${client
+        ? (isOwner
+          ? `<a href="#" onclick="navigate('clients');return false" style="color:inherit;text-decoration:underline">${escHtml(client.name)}</a>`
+          : escHtml(client.name))
+        : "—"}
     </div>` : ""}
-    <div class="card">
-      <div class="card-header"><div class="card-title">Monthly Usage</div></div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-header"><div class="card-title">Account Notes</div></div>
       <div class="card-body">
-        ${org.limit_exceeded_at ? `<div class="alert alert-danger">Limit exceeded on ${new Date(org.limit_exceeded_at).toLocaleDateString()}.</div>` : ""}
-        <div class="progress-wrap" style="margin-bottom:8px">
-          <div class="progress-bar" style="height:12px">
-            <div class="progress-fill ${fillClass}" style="width:${Math.min(pct, 100)}%"></div>
-          </div>
-          <span class="progress-label font-semibold" style="font-size:14px">${pct}%</span>
+        <div class="form-group" style="margin-bottom:10px">
+          <textarea id="org-note-input" rows="2" placeholder="Leave a note on this account…" maxlength="2000"></textarea>
         </div>
-        <div class="text-muted" style="font-size:13px">
-          ${org.messages_used_this_month.toLocaleString()} of ${org.message_limit_per_month.toLocaleString()} messages used this month
+        <div class="flex-row" style="justify-content:flex-end;margin-bottom:6px">
+          <button class="btn btn-primary btn-sm" onclick="addOrgNote()">Add Note</button>
         </div>
+        ${notes?.length ? `<table style="margin-top:8px">
+          <thead><tr><th style="width:150px">Date</th><th style="width:140px">By</th><th>Note</th><th style="width:44px"></th></tr></thead>
+          <tbody>${notes.map(n => `<tr>
+            <td class="text-sm">${new Date(n.created_at).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}</td>
+            <td class="text-sm">${escHtml(n.created_by_name || "—")}</td>
+            <td class="text-sm" style="white-space:pre-wrap">${escHtml(n.body)}</td>
+            <td>${(isOwner || n.created_by === dashUser?.id)
+              ? `<button class="btn btn-ghost btn-sm" title="Delete note" onclick="deleteOrgNote('${n.id}')">&times;</button>`
+              : ""}</td>
+          </tr>`).join("")}</tbody>
+        </table>` : `<div class="text-muted" style="font-size:13px;margin-top:8px">No notes yet.</div>`}
       </div>
     </div>`;
+}
+
+async function addOrgNote() {
+  const input = document.getElementById("org-note-input");
+  const text = (input?.value || "").trim();
+  if (!text) { toast("Note cannot be empty", "error"); return; }
+  try {
+    const { note } = await api("add_org_note", { org_id: currentOrgId, body: text });
+    window._orgData.notes = [note, ...(window._orgData.notes || [])];
+    toast("Note added", "success");
+    renderTab();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function deleteOrgNote(noteId) {
+  if (!confirm("Delete this note?")) return;
+  try {
+    await api("delete_org_note", { org_id: currentOrgId, note_id: noteId });
+    window._orgData.notes = (window._orgData.notes || []).filter(n => n.id !== noteId);
+    toast("Note deleted", "success");
+    renderTab();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+// ── Channels Tab ─────────────────────────────────────────────────────────────
+// One tab per org for all communication channels. Each channel gets its own
+// sub-panel with its own config; new channels (voice, SMS, WhatsApp, …)
+// slot in as additional pills here.
+
+let currentChannel = "webchat";
+
+function renderChannelsTab(el, org, providers, widget) {
+  if (currentIsDemo) currentChannel = "webchat";
+  el.innerHTML = `
+    <div class="tabs" style="margin-bottom:16px">
+      <button class="tab ${currentChannel === "webchat" ? "active" : ""}" onclick="switchChannel('webchat')">Website Chat</button>
+      ${!currentIsDemo ? `<button class="tab ${currentChannel === "email" ? "active" : ""}" onclick="switchChannel('email')">Email</button>` : ""}
+    </div>
+    <div id="channel-panel"></div>`;
+  const panel = document.getElementById("channel-panel");
+  if (currentChannel === "email" && !currentIsDemo) renderEmailTab(panel, org, providers);
+  else renderWidgetTab(panel, widget, org);
+}
+
+function switchChannel(channel) {
+  currentChannel = channel;
+  renderTab();
 }
 
 // ── Email Tab ─────────────────────────────────────────────────────────────────
@@ -1068,6 +1150,25 @@ function renderEmailTab(el, org, providers) {
         </div>
       </div>
     </div>
+    <div class="card mb-4">
+      <div class="card-header"><div class="card-title">AI Responses</div></div>
+      <div class="card-body">
+        <div class="toggle-row" style="border-bottom:none">
+          <div>
+            <div class="toggle-label">Email AI Responses</div>
+            <div class="toggle-desc">${provider
+              ? "Process inbound emails with AI (disable to save messages without AI)"
+              : "Connect an email account above to enable AI responses"}</div>
+          </div>
+          ${isOwner ? `<label class="toggle">
+            <input type="checkbox" id="email-ai-toggle" ${org.ai_responses_enabled && provider ? "checked" : ""}
+              ${provider ? "" : "disabled"}
+              onchange="toggleEmailAi(this.checked)">
+            <span class="toggle-slider"></span>
+          </label>` : `<span class="badge badge-${org.ai_responses_enabled && provider ? "green" : "gray"}">${org.ai_responses_enabled && provider ? "Enabled" : "Disabled"}</span>`}
+        </div>
+      </div>
+    </div>
     <div class="card" id="auth-link-card" style="display:none">
       <div class="card-header"><div class="card-title">Authorization Link</div></div>
       <div class="card-body">
@@ -1080,26 +1181,7 @@ function renderEmailTab(el, org, providers) {
           <button class="btn btn-secondary" onclick="openAuthLink()">${ICONS.external} Open in This Browser</button>
         </div>
       </div>
-    </div>
-    <div class="card mb-4" style="margin-top:20px">
-      <div class="card-header">
-        <div class="card-title">Notification Recipients</div>
-        <button class="btn btn-primary btn-sm" onclick="showAddRecipientModal()">
-          ${ICONS.plus} Add Recipient
-        </button>
-      </div>
-      <div class="card-body card-body-flush">
-        <div id="recipients-list">
-          <div class="loading-overlay"><div class="spinner"></div></div>
-        </div>
-      </div>
-      <div class="card-body text-sm text-muted" style="padding:10px 16px;border-top:1px solid var(--border)">
-        If no recipients are added, escalations and alerts go to the connected inbox.
-      </div>
     </div>`;
-
-  // Load recipients
-  loadRecipients();
 }
 
 async function connectEmail(provider) {
@@ -1132,32 +1214,6 @@ function openAuthLink() {
   if (window._authLink) {
     window.open(window._authLink, "_blank");
   }
-}
-
-// ── Notifications Tab (demos only) ───────────────────────────────────────────
-
-function renderNotificationsTab(el, org) {
-  el.innerHTML = `
-    <div class="card mb-4">
-      <div class="card-header">
-        <div class="card-title">Notification Recipients</div>
-        <button class="btn btn-primary btn-sm" onclick="showAddRecipientModal()">
-          ${ICONS.plus} Add Recipient
-        </button>
-      </div>
-      <div class="card-body card-body-flush">
-        <div id="recipients-list">
-          <div class="loading-overlay"><div class="spinner"></div></div>
-        </div>
-      </div>
-      <div class="card-body text-sm text-muted" style="padding:10px 16px;border-top:1px solid var(--border)">
-        ${isOwner
-          ? "Manage the people who should receive escalations and alerts for this demo."
-          : "Add the people who should receive escalations and alerts for this demo."}
-      </div>
-    </div>`;
-
-  loadRecipients();
 }
 
 // ── Widget Tab ────────────────────────────────────────────────────────────────
@@ -1266,21 +1322,55 @@ function renderWidgetTab(el, widget, org) {
     <div class="card mb-4">
       <div class="card-header"><div class="card-title">Colors</div></div>
       <div class="card-body">
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Element</th>
-                <th>Light Mode</th>
-                <th>Dark Mode</th>
-              </tr>
-            </thead>
-            <tbody>${colorRows}</tbody>
-          </table>
+        <div class="wprev-layout">
+          <div class="wprev-table-col">
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Element</th>
+                    <th>Light Mode</th>
+                    <th>Dark Mode</th>
+                  </tr>
+                </thead>
+                <tbody>${colorRows}</tbody>
+              </table>
+            </div>
+            <button class="btn btn-primary" style="margin-top:16px" onclick="saveWidgetConfig()">
+              Save Widget Settings
+            </button>
+          </div>
+          <div class="wprev-preview-col">
+            <div class="wprev-mode-toggle">
+              <button class="btn btn-sm" id="wprev-mode-light" onclick="setWidgetPreviewMode('light')">Light</button>
+              <button class="btn btn-sm" id="wprev-mode-dark" onclick="setWidgetPreviewMode('dark')">Dark</button>
+            </div>
+            <div id="wprev-root">
+              <div class="wprev-window">
+                <div class="wprev-header">
+                  <span id="wprev-title">Chat with us</span>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </div>
+                <div class="wprev-messages">
+                  <div class="wprev-msg ai">
+                    <div class="wprev-avatar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
+                    <div class="wprev-bubble" id="wprev-welcome">Hi! How can we help you today?</div>
+                  </div>
+                  <div class="wprev-msg user"><div class="wprev-bubble">Hi! Do you have any availability this Saturday?</div></div>
+                  <div class="wprev-msg ai">
+                    <div class="wprev-avatar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
+                    <div class="wprev-bubble">Yes — we have openings Saturday morning. Would you like me to book one for you?</div>
+                  </div>
+                </div>
+                <div class="wprev-input-area">
+                  <div class="wprev-input">Type a message…</div>
+                  <div class="wprev-send"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M2 21l21-9L2 3v7l15 2-15 2v7z"/></svg></div>
+                </div>
+                <div class="wprev-powered">Powered by <strong>Horus Desk</strong></div>
+              </div>
+            </div>
+          </div>
         </div>
-        <button class="btn btn-primary" style="margin-top:16px" onclick="saveWidgetConfig()">
-          Save Widget Settings
-        </button>
       </div>
     </div>
 
@@ -1347,17 +1437,60 @@ function renderWidgetTab(el, widget, org) {
       </div>
     </div>`}`;
 
-  // Wire up color input live preview labels
+  // Wire up color input live preview labels + live widget preview
   const colorFieldKeys = colorFields.map(f => f.key);
   colorFieldKeys.forEach(key => {
     ["cl", "cd"].forEach(prefix => {
       const input = document.getElementById(`${prefix}-${key}`);
       const val = document.getElementById(`${prefix}-${key}-val`);
       if (input && val) {
-        input.addEventListener("input", () => { val.textContent = input.value; });
+        input.addEventListener("input", () => { val.textContent = input.value; updateWidgetPreview(); });
       }
     });
   });
+  ["w-header-title", "w-welcome"].forEach(id => {
+    document.getElementById(id)?.addEventListener("input", updateWidgetPreview);
+  });
+  updateWidgetPreview();
+}
+
+// ── Widget live preview (Colors card) ─────────────────────────────────────────
+
+let _widgetPreviewMode = "light";
+
+function setWidgetPreviewMode(mode) {
+  _widgetPreviewMode = mode;
+  updateWidgetPreview();
+}
+
+function updateWidgetPreview() {
+  const root = document.getElementById("wprev-root");
+  if (!root) return;
+  const prefix = _widgetPreviewMode === "dark" ? "cd" : "cl";
+  const varNames = {
+    headerBg: "--horus-header-bg", headerText: "--horus-header-text",
+    userBubble: "--horus-user-bubble", userText: "--horus-user-text",
+    aiBubble: "--horus-ai-bubble", aiText: "--horus-ai-text",
+    bg: "--horus-bg", inputBg: "--horus-input-bg", inputText: "--horus-input-text",
+    sendBtn: "--horus-send-btn", sendBtnText: "--horus-send-btn-text",
+  };
+  Object.entries(varNames).forEach(([key, varName]) => {
+    const input = document.getElementById(`${prefix}-${key}`);
+    if (input) root.style.setProperty(varName, input.value);
+  });
+  root.style.setProperty("--horus-border", _widgetPreviewMode === "dark" ? "#374151" : "#e5e7eb");
+  const title = document.getElementById("w-header-title")?.value.trim() || "Chat with us";
+  const welcome = document.getElementById("w-welcome")?.value.trim() || "Hi! How can we help you today?";
+  const titleEl = document.getElementById("wprev-title");
+  const welcomeEl = document.getElementById("wprev-welcome");
+  if (titleEl) titleEl.textContent = title;
+  if (welcomeEl) welcomeEl.textContent = welcome;
+  const lightBtn = document.getElementById("wprev-mode-light");
+  const darkBtn = document.getElementById("wprev-mode-dark");
+  if (lightBtn && darkBtn) {
+    lightBtn.className = `btn btn-sm ${_widgetPreviewMode === "light" ? "btn-primary" : "btn-secondary"}`;
+    darkBtn.className = `btn btn-sm ${_widgetPreviewMode === "dark" ? "btn-primary" : "btn-secondary"}`;
+  }
 }
 
 async function toggleWidget(enabled) {
@@ -1379,17 +1512,6 @@ async function toggleEmailAi(enabled) {
     });
     if (window._orgData?.org) window._orgData.org.ai_responses_enabled = enabled;
     toast(`Email AI ${enabled ? "enabled" : "disabled"}`, "success");
-  } catch (e) { toast(e.message, "error"); }
-}
-
-async function toggleAutoSend(enabled) {
-  try {
-    await api("update_org", {
-      org_id: currentOrgId,
-      updates: { auto_send_enabled: enabled },
-    });
-    if (window._orgData?.org) window._orgData.org.auto_send_enabled = enabled;
-    toast(`Auto-send ${enabled ? "enabled" : "disabled"}`, "success");
   } catch (e) { toast(e.message, "error"); }
 }
 
@@ -2206,16 +2328,6 @@ function renderSettingsTab(el, org) {
             <div class="form-hint">Messages older than this are deleted automatically each night. Conversations with no remaining messages are also removed.</div>
           </div>
         </div>` : ""}
-        <div class="toggle-row">
-          <div>
-            <div class="toggle-label">Auto-Send Enabled</div>
-            <div class="toggle-desc">Automatically send AI responses above the confidence threshold</div>
-          </div>
-          <label class="toggle">
-            <input type="checkbox" id="s-autosend" ${org.auto_send_enabled?"checked":""}>
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
         <div style="margin-top:16px">
           <button class="btn btn-primary" onclick="saveOrgSettings()">Save Settings</button>
         </div>
@@ -2310,7 +2422,6 @@ async function saveOrgSettings() {
     ai_tone: document.getElementById("s-tone").value,
     subscription_tier: document.getElementById("s-tier").value,
     subscription_plan: document.getElementById("s-plan").value,
-    auto_send_enabled: document.getElementById("s-autosend").checked,
   };
   if (isOwner) {
     updates.auto_send_min_confidence = parseFloat(document.getElementById("s-confidence").value);
@@ -2427,7 +2538,7 @@ function renderReportsTab(el, org) {
             <select id="r-recipient">
               <option value="">Loading recipients…</option>
             </select>
-            <div class="form-hint">Defaults to the connected inbox. Manage notification recipients in the ${currentIsDemo ? "Notifications" : "Email Setup"} tab.</div>
+            <div class="form-hint">Defaults to the connected inbox.</div>
           </div>
         </div>
         <div style="margin-top:16px">
@@ -3061,7 +3172,7 @@ async function emailPaymentLink() {
       resultEl.innerHTML = `<div class="alert alert-success">Sent to: ${sent_to.map(escHtml).join(", ")}</div>`;
       toast("Payment link emailed", "success");
     } else {
-      resultEl.innerHTML = `<div class="alert alert-danger">No system-alert recipients configured and no email provider connected.</div>`;
+      resultEl.innerHTML = `<div class="alert alert-danger">No email account connected for this organization.</div>`;
     }
   } catch (e) {
     resultEl.innerHTML = `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
@@ -3286,266 +3397,6 @@ async function renderSalesReport(main) {
 function copySnippet() {
   navigator.clipboard.writeText(window._currentSnippet);
   toast('Copied', 'success');
-}
-
-// ── Notification Recipients ───────────────────────────────────────────────────
-
-const EVENT_TYPE_LABELS = {
-  escalation: "Escalations",
-  "escalation:frustrated": "Frustrated",
-  "escalation:lead": "Leads",
-  "escalation:kb_gap": "KB Gap",
-  usage_limit: "Usage Limit Alerts",
-  system: "System Alerts",
-};
-
-const ESCALATION_SUBTYPES = [
-  { key: "escalation:frustrated", label: "Frustrated / Angry Customers" },
-  { key: "escalation:lead",      label: "Sales Leads" },
-  { key: "escalation:kb_gap",    label: "Knowledge Gaps" },
-];
-
-async function loadRecipients() {
-  const el = document.getElementById("recipients-list");
-  if (!el) return;
-
-  try {
-    const { recipients } = await api("list_recipients", { org_id: currentOrgId });
-    window._recipientsCache = {};
-    for (const r of recipients) window._recipientsCache[r.id] = r;
-
-    if (recipients.length === 0) {
-      el.innerHTML = `<div class="empty-state" style="padding:24px"><p>No recipients added. Notifications go to the connected inbox.</p></div>`;
-      return;
-    }
-
-    const showActions = isOwner;
-
-    const rows = recipients.map(r => {
-      const tags = (r.notify_on || []).map(t =>
-        `<span class="badge badge-blue" style="margin-right:4px">${EVENT_TYPE_LABELS[t] || t}</span>`
-      ).join("");
-
-      return `
-        <div class="flex-row-spread" style="padding:12px 16px;border-bottom:1px solid var(--border)">
-          <div>
-            <div style="font-weight:500;font-size:13px">${escHtml(r.name || r.email)}</div>
-            ${r.name ? `<div class="text-sm text-muted">${escHtml(r.email)}</div>` : ""}
-            <div style="margin-top:6px">${tags || '<span class="text-sm text-muted">No notifications</span>'}</div>
-          </div>
-          ${showActions ? `<div class="flex-row">
-            <label class="toggle" title="${r.is_active ? "Active" : "Disabled"}">
-              <input type="checkbox" ${r.is_active ? "checked" : ""}
-                onchange="toggleRecipient('${r.id}', this.checked)">
-              <span class="toggle-slider"></span>
-            </label>
-            <button class="btn btn-ghost btn-sm" onclick="showEditRecipientModal('${r.id}')">Edit</button>
-            <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="deleteRecipient('${r.id}')">Remove</button>
-          </div>` : `<div class="flex-row">
-            <span class="badge ${r.is_active ? "badge-green" : "badge-gray"}">${r.is_active ? "Active" : "Disabled"}</span>
-          </div>`}
-        </div>`;
-    }).join("");
-
-    el.innerHTML = rows;
-  } catch (e) {
-    el.innerHTML = `<div class="card-body"><div class="alert alert-danger">${escHtml(e.message)}</div></div>`;
-  }
-}
-
-function recipientModalHtml(title, id, email, name, notifyOn) {
-  const effectiveNotify = notifyOn || ["escalation", "usage_limit", "system"];
-
-  // Determine escalation parent/sub-type checked state
-  const hasLegacyEscalation = effectiveNotify.includes("escalation");
-  const hasAnySubType = ESCALATION_SUBTYPES.some(s => effectiveNotify.includes(s.key));
-  const escalationChecked = hasLegacyEscalation || hasAnySubType;
-
-  const subCheckboxes = ESCALATION_SUBTYPES.map(s => {
-    const checked = hasLegacyEscalation || effectiveNotify.includes(s.key);
-    return `
-      <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:400;text-transform:none;letter-spacing:0;cursor:pointer;margin-bottom:6px;margin-left:28px;color:var(--text)">
-        <input type="checkbox" id="rn-${s.key}" ${checked ? "checked" : ""}
-          onchange="updateEscalationParent()">
-        ${s.label}
-      </label>`;
-  }).join("");
-
-  const checkboxes = `
-    <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:400;text-transform:none;letter-spacing:0;cursor:pointer;margin-bottom:8px;color:var(--text)">
-      <input type="checkbox" id="rn-escalation" ${escalationChecked ? "checked" : ""}
-        onchange="toggleEscalationSubTypes(this.checked)">
-      ${EVENT_TYPE_LABELS["escalation"]}
-    </label>
-    <div id="escalation-subtypes" style="display:${escalationChecked ? "block" : "none"};margin-bottom:8px">
-      ${subCheckboxes}
-    </div>
-  ` + ["usage_limit", "system"].map(t => `
-    <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:400;text-transform:none;letter-spacing:0;cursor:pointer;margin-bottom:8px;color:var(--text)">
-      <input type="checkbox" id="rn-${t}" ${effectiveNotify.includes(t) ? "checked" : ""}>
-      ${EVENT_TYPE_LABELS[t]}
-    </label>`).join("");
-
-  return `
-    <div class="modal">
-      <div class="modal-header">
-        <div class="modal-title">${title}</div>
-        <button class="btn btn-ghost btn-sm" onclick="this.closest('.modal-backdrop').remove()">✕</button>
-      </div>
-      <div class="modal-body">
-        <div class="form-group">
-          <label>Email Address</label>
-          <input type="email" id="r-email" value="${escHtml(email)}" placeholder="manager@example.com" />
-        </div>
-        <div class="form-group">
-          <label>Name <span class="hint">(optional label)</span></label>
-          <input type="text" id="r-name" value="${escHtml(name)}" placeholder="Sarah (Manager)" />
-        </div>
-        <div class="form-group">
-          <label>Notify On</label>
-          ${checkboxes}
-        </div>
-        <div id="recipient-modal-error"></div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn btn-secondary" onclick="this.closest('.modal-backdrop').remove()">Cancel</button>
-        <button class="btn btn-primary" id="recipient-submit-btn"
-          onclick="${id ? `saveRecipient('${id}')` : "addRecipient()"}">
-          ${id ? "Save Changes" : "Add Recipient"}
-        </button>
-      </div>
-    </div>`;
-}
-
-function toggleEscalationSubTypes(checked) {
-  const container = document.getElementById("escalation-subtypes");
-  if (container) container.style.display = checked ? "block" : "none";
-  ESCALATION_SUBTYPES.map(s => s.key).forEach(key => {
-    const el = document.getElementById(`rn-${key}`);
-    if (el) el.checked = checked;
-  });
-}
-
-function updateEscalationParent() {
-  const anyChecked = ESCALATION_SUBTYPES.map(s => s.key)
-    .some(key => document.getElementById(`rn-${key}`)?.checked);
-  const parent = document.getElementById("rn-escalation");
-  if (parent) parent.checked = anyChecked;
-  const container = document.getElementById("escalation-subtypes");
-  if (container) container.style.display = anyChecked ? "block" : "none";
-}
-
-function showAddRecipientModal() {
-  const modal = document.createElement("div");
-  modal.className = "modal-backdrop";
-  modal.innerHTML = recipientModalHtml("Add Notification Recipient", null, "", "", null);
-  document.body.appendChild(modal);
-}
-
-function showEditRecipientModal(id) {
-  const r = window._recipientsCache?.[id];
-  if (!r) return;
-  const notifyOn = typeof r.notify_on === "string" ? JSON.parse(r.notify_on) : r.notify_on;
-  const modal = document.createElement("div");
-  modal.className = "modal-backdrop";
-  modal.innerHTML = recipientModalHtml("Edit Recipient", id, r.email, r.name || "", notifyOn);
-  document.body.appendChild(modal);
-}
-
-function getRecipientFormValues() {
-  const email = document.getElementById("r-email").value.trim();
-  const name = document.getElementById("r-name").value.trim();
-
-  const notifyOn = [];
-
-  // Collect escalation sub-types if parent is checked
-  if (document.getElementById("rn-escalation")?.checked) {
-    const subTypes = ESCALATION_SUBTYPES.map(s => s.key)
-      .filter(key => document.getElementById(`rn-${key}`)?.checked);
-    // All 3 checked → store "escalation" (compact, auto-includes future sub-types)
-    if (subTypes.length === 3) {
-      notifyOn.push("escalation");
-    } else {
-      notifyOn.push(...subTypes);
-    }
-  }
-
-  ["usage_limit", "system"].forEach(t => {
-    if (document.getElementById(`rn-${t}`)?.checked) notifyOn.push(t);
-  });
-
-  return { email, name, notifyOn };
-}
-
-async function addRecipient() {
-  const { email, name, notifyOn } = getRecipientFormValues();
-  const errEl = document.getElementById("recipient-modal-error");
-  if (!email) { errEl.innerHTML = '<div class="alert alert-danger">Email is required.</div>'; return; }
-
-  const btn = document.getElementById("recipient-submit-btn");
-  btn.disabled = true;
-  btn.innerHTML = '<div class="spinner"></div> Adding...';
-
-  try {
-    await api("add_recipient", { org_id: currentOrgId, email, name, notify_on: notifyOn });
-    document.querySelector(".modal-backdrop")?.remove();
-    toast("Recipient added", "success");
-    loadRecipients();
-  } catch (e) {
-    errEl.innerHTML = `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
-    btn.disabled = false;
-    btn.innerHTML = "Add Recipient";
-  }
-}
-
-async function saveRecipient(id) {
-  const { email, name, notifyOn } = getRecipientFormValues();
-  const errEl = document.getElementById("recipient-modal-error");
-  if (!email) { errEl.innerHTML = '<div class="alert alert-danger">Email is required.</div>'; return; }
-
-  const btn = document.getElementById("recipient-submit-btn");
-  btn.disabled = true;
-  btn.innerHTML = '<div class="spinner"></div> Saving...';
-
-  try {
-    await api("update_recipient", {
-      org_id: currentOrgId,
-      recipient_id: id,
-      updates: { email, name: name || null, notify_on: notifyOn },
-    });
-    document.querySelector(".modal-backdrop")?.remove();
-    toast("Recipient updated", "success");
-    loadRecipients();
-  } catch (e) {
-    errEl.innerHTML = `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
-    btn.disabled = false;
-    btn.innerHTML = "Save Changes";
-  }
-}
-
-async function toggleRecipient(id, isActive) {
-  try {
-    await api("update_recipient", {
-      org_id: currentOrgId,
-      recipient_id: id,
-      updates: { is_active: isActive },
-    });
-    toast(isActive ? "Recipient enabled" : "Recipient disabled", "success");
-  } catch (e) {
-    toast(e.message, "error");
-    loadRecipients(); // Reset toggle state on error
-  }
-}
-
-async function deleteRecipient(id) {
-  if (!confirm("Remove this recipient?")) return;
-  try {
-    await api("delete_recipient", { org_id: currentOrgId, recipient_id: id });
-    toast("Recipient removed", "success");
-    loadRecipients();
-  } catch (e) {
-    toast(e.message, "error");
-  }
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────

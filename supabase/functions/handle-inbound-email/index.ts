@@ -920,24 +920,39 @@ async function loadAllKbChunks(
   supabase: ReturnType<typeof createClient>,
   organizationId: string,
 ): Promise<Array<{ content: string }>> {
-  const { data: allChunks } = await supabase
-    .schema("kb").from("kb_chunks")
-    .select("content")
-    .eq("organization_id", organizationId)
-    .order("chunk_index", { ascending: true });
+  // Versioned KB (structured sections) — the AI reads through the org's
+  // active_kb_version_id pointer. Every amend creates a new version.
+  const { data: orgRow } = await supabase
+    .schema("core").from("organizations")
+    .select("active_kb_version_id")
+    .eq("id", organizationId)
+    .single();
 
-  if (!allChunks || allChunks.length === 0) return [];
+  let texts: string[] = [];
+
+  if (orgRow?.active_kb_version_id) {
+    const { data: version } = await supabase
+      .schema("kb").from("kb_versions")
+      .select("sections")
+      .eq("id", orgRow.active_kb_version_id)
+      .single();
+    const sections = (version?.sections as Array<{ title?: string; body?: string }>) || [];
+    texts = sections.map((s) => s.title ? `## ${s.title}\n\n${s.body ?? ""}` : (s.body ?? ""));
+  }
+  // No active version = empty KB (orgs with legacy chunks were all migrated
+  // to v1; the old kb_chunks table has been dropped).
 
   let total = 0;
   const result: Array<{ content: string }> = [];
-  for (const c of allChunks) {
-    total += (c.content as string).length;
+  for (const text of texts) {
+    if (!text) continue;
+    total += text.length;
     if (total > KB_MAX_CHARS) {
       console.warn(`KB truncated at ${KB_MAX_CHARS} chars for org ${organizationId}`);
       result.push({ content: "[Note: knowledge base truncated due to size]" });
       break;
     }
-    result.push({ content: c.content });
+    result.push({ content: text });
   }
   return result;
 }

@@ -85,6 +85,7 @@ async function onLogin(user) {
     document.getElementById("sales-nav-item").style.display = "";
     if (isOwner) {
       document.getElementById("team-nav-item").style.display = "";
+      document.getElementById("clients-nav-item").style.display = "";
     }
     document.getElementById("section-manage").style.display = "";
 
@@ -171,6 +172,7 @@ async function render() {
   else if (currentView === "demo-detail") await renderDemoDetail(main);
   else if (currentView === "sales") await renderSalesReport(main);
   else if (currentView === "team") await renderTeamPage(main);
+  else if (currentView === "clients") await renderClientList(main);
 }
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
@@ -290,6 +292,76 @@ async function renderOrgList(main) {
           <tbody id="org-list-body">${rows}</tbody>
         </table>
         <div id="org-empty-msg" class="empty-state" style="display:none;"><p>No organizations match your search.</p></div>
+      </div>`;
+  } catch (e) {
+    main.querySelector(".card").innerHTML =
+      `<div class="card-body"><div class="alert alert-danger">${escHtml(e.message)}</div></div>`;
+  }
+}
+
+// ── Client List (owner only) ──────────────────────────────────────────────────
+
+async function renderClientList(main) {
+  main.innerHTML = `
+    <div class="page-header">
+      <div>
+        <div class="page-title">Clients</div>
+        <div class="page-subtitle">All client accounts</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="loading-overlay"><div class="spinner"></div> Loading...</div>
+    </div>`;
+
+  try {
+    const { clients, members, orgs, owners } = await api("list_clients");
+
+    const ownerMap = {};
+    (owners || []).forEach(o => { ownerMap[o.id] = o.email; });
+    const memberCount = {};
+    (members || []).forEach(m => { memberCount[m.client_id] = (memberCount[m.client_id] || 0) + 1; });
+    const orgCount = {};
+    (orgs || []).forEach(o => {
+      _nameCache[o.id] = o.name;
+      if (o.client_id) orgCount[o.client_id] = (orgCount[o.client_id] || 0) + 1;
+    });
+
+    if ((clients || []).length === 0) {
+      main.querySelector(".card").innerHTML =
+        `<div class="empty-state"><p>No clients yet.</p></div>`;
+      return;
+    }
+
+    const rows = clients.map(client => {
+      const ownerEmail = client.owner_id ? ownerMap[client.owner_id] : null;
+      const created = new Date(client.created_at)
+        .toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+      const searchKey = `${client.name} ${client.notes || ""} ${ownerEmail || ""}`.toLowerCase();
+      return `
+        <tr data-search="${escHtml(searchKey)}">
+          <td>
+            <span style="font-weight:600;">${escHtml(client.name)}</span>
+            ${client.notes ? `<div class="text-sm text-muted">${escHtml(client.notes)}</div>` : ""}
+          </td>
+          <td>${ownerEmail ? escHtml(ownerEmail) : `<span class="text-muted">—</span>`}</td>
+          <td>${memberCount[client.id] || 0}</td>
+          <td>${orgCount[client.id] || 0}</td>
+          <td class="text-sm text-muted">${created}</td>
+        </tr>`;
+    }).join("");
+
+    main.querySelector(".card").innerHTML = `
+      <div class="card-body" style="padding-bottom:0;">
+        <input type="text" id="client-search" placeholder="Search by name, notes, or owner..."
+               oninput="filterTableRows('client-search','client-list-body','client-empty-msg')"
+               style="width:100%;max-width:400px;" />
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Client</th><th>Owner</th><th>Members</th><th>Organizations</th><th>Created</th></tr></thead>
+          <tbody id="client-list-body">${rows}</tbody>
+        </table>
+        <div id="client-empty-msg" class="empty-state" style="display:none;"><p>No clients match your search.</p></div>
       </div>`;
   } catch (e) {
     main.querySelector(".card").innerHTML =
@@ -1361,172 +1433,339 @@ async function saveWidgetConfig() {
   } catch (e) { toast(e.message, "error"); }
 }
 
-// ── KB Tab ────────────────────────────────────────────────────────────────────
+// ── KB Tab (versioned sections editor) ────────────────────────────────────────
+// One knowledge base per org: an append-only chain of versions, each a list of
+// structured sections ({title, body}). Edits are local until "Save as New
+// Version" — nothing is edited in place; rollback creates a NEW version copying
+// the old one. See docs/client-rbac-plan.md §5.
 
-function renderKbTab(el, kbDocs, org) {
-  const rows = kbDocs.length === 0
-    ? `<tr><td colspan="4"><div class="empty-state" style="padding:24px"><p>No documents yet.</p></div></td></tr>`
-    : kbDocs.map(doc => `
-        <tr>
-          <td><div class="font-semibold">${escHtml(doc.title)}</div></td>
-          <td><span class="badge badge-blue">${doc.file_type}</span></td>
-          <td><span class="badge ${doc.status==="ready"?"badge-green":doc.status==="error"?"badge-red":"badge-yellow"}">${doc.status}</span></td>
-          <td>${new Date(doc.created_at).toLocaleDateString()}</td>
-          <td class="table-actions">
-            <button class="btn btn-ghost btn-sm" onclick="showEditKbModal('${doc.id}')">Edit</button>
-            <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="deleteKbDoc('${doc.id}')">Delete</button>
-          </td>
-        </tr>`).join("");
+let _kb = null; // { orgId, sections: [{title, body, _editing?, _collapsed?}], dirty, activeVersionNum }
 
-  el.innerHTML = `
-    <div class="card">
-      <div class="card-header">
-        <div class="card-title">Documents (${kbDocs.length})</div>
-        <div class="flex-row">
-          ${!currentIsDemo ? `<button class="btn btn-secondary btn-sm" onclick="showUseTemplateModal('kb')">Use Template</button>` : ""}
-          <button class="btn btn-primary btn-sm" onclick="showAddKbModal()">${ICONS.plus} Add Document</button>
+async function renderKbTab(el, kbDocs, org) {
+  el.innerHTML = `<div class="card"><div class="loading-overlay"><div class="spinner"></div> Loading...</div></div>`;
+  try {
+    const [{ versions }, { requests }] = await Promise.all([
+      api("list_kb_versions", { org_id: org.id }),
+      api("list_kb_amend_requests", { org_id: org.id }),
+    ]);
+
+    let sections = [];
+    if (org.active_kb_version_id) {
+      const { version } = await api("get_kb_version", { org_id: org.id, version_id: org.active_kb_version_id });
+      sections = (version.sections || []).map(s => ({ title: s.title || "", body: s.body || "" }));
+    }
+
+    _kb = {
+      orgId: org.id,
+      sections,
+      dirty: false,
+      activeVersionNum: (versions.find(v => v.id === org.active_kb_version_id) || {}).version || null,
+    };
+
+    el.innerHTML = `
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Knowledge Base ${_kb.activeVersionNum ? `<span class="badge badge-blue" style="margin-left:6px">v${_kb.activeVersionNum}</span>` : ""}</div>
+          <div class="flex-row">
+            ${!currentIsDemo ? `<button class="btn btn-secondary btn-sm" onclick="showUseTemplateModal('kb')">Use Template</button>` : ""}
+            <button class="btn btn-primary btn-sm" onclick="kbAddSection()">${ICONS.plus} Add Section</button>
+          </div>
+        </div>
+        <div id="kb-sections"></div>
+        <div class="card-body" id="kb-save-bar" style="display:none;border-top:1px solid var(--border)">
+          <div class="form-group" style="margin-bottom:8px">
+            <label>Change summary <span class="hint">(required — becomes the version's history entry)</span></label>
+            <input type="text" id="kb-change-summary" placeholder="e.g. Updated refund policy" />
+          </div>
+          <div class="flex-row">
+            <button class="btn btn-primary" id="kb-save-btn" onclick="kbSaveVersion()">Save as New Version</button>
+            <button class="btn btn-secondary" onclick="renderKbTab(document.getElementById('tab-content'), null, window._orgData.org)">Discard Changes</button>
+          </div>
         </div>
       </div>
+      ${kbAmendRequestsHtml(requests || [])}
+      ${kbVersionHistoryHtml(versions || [])}`;
+    kbRenderSections();
+  } catch (e) {
+    el.innerHTML = `<div class="card"><div class="card-body"><div class="alert alert-danger">${escHtml(e.message)}</div></div></div>`;
+  }
+}
+
+function kbRenderSections() {
+  const wrap = document.getElementById("kb-sections");
+  if (!wrap || !_kb) return;
+
+  if (_kb.sections.length === 0) {
+    wrap.innerHTML = `<div class="card-body"><div class="empty-state"><p>No knowledge yet. Add a section to get started.</p></div></div>`;
+    return;
+  }
+
+  wrap.innerHTML = _kb.sections.map((s, i) => {
+    if (s._editing) return kbSectionEditorHtml(s, i);
+    const body = s._collapsed
+      ? ""
+      : `<div style="padding:10px 16px 14px;border-top:1px solid var(--border)">${kbFormatBody(s.body)}</div>`;
+    return `
+      <div style="border-top:1px solid var(--border)">
+        <div style="display:flex;align-items:center;gap:4px;padding:8px 16px;">
+          <button class="btn btn-ghost btn-sm" title="Move up" onclick="kbMoveSection(${i},-1)" ${i === 0 ? "disabled" : ""}>↑</button>
+          <button class="btn btn-ghost btn-sm" title="Move down" onclick="kbMoveSection(${i},1)" ${i === _kb.sections.length - 1 ? "disabled" : ""}>↓</button>
+          <div style="flex:1;font-weight:600;cursor:pointer" onclick="kbToggleSection(${i})">${escHtml(s.title || "Untitled section")}</div>
+          <button class="btn btn-ghost btn-sm" onclick="kbEditSection(${i})">Edit</button>
+          <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="kbDeleteSection(${i})">Delete</button>
+        </div>
+        ${body}
+      </div>`;
+  }).join("");
+}
+
+function kbSectionEditorHtml(s, i) {
+  return `
+    <div style="border-top:1px solid var(--border);padding:12px 16px;">
+      <div class="form-group" style="margin-bottom:8px">
+        <input type="text" id="kb-edit-title-${i}" value="${escHtml(s.title)}" placeholder="Section title (e.g. Refund Policy)" />
+      </div>
+      <div class="flex-row" style="margin-bottom:6px;gap:4px">
+        <button class="btn btn-ghost btn-sm" onclick="kbFormat(${i},'bold')" title="Bold"><strong>B</strong></button>
+        <button class="btn btn-ghost btn-sm" onclick="kbFormat(${i},'list')" title="Bullet list">• List</button>
+        <button class="btn btn-ghost btn-sm" onclick="kbFormat(${i},'link')" title="Link">🔗 Link</button>
+      </div>
+      <textarea id="kb-edit-body-${i}" rows="8" style="width:100%">${escHtml(s.body)}</textarea>
+      <div class="flex-row" style="margin-top:8px">
+        <button class="btn btn-primary btn-sm" onclick="kbSaveSectionEdit(${i})">Done</button>
+        <button class="btn btn-ghost btn-sm" onclick="kbCancelSectionEdit(${i})">Cancel</button>
+      </div>
+    </div>`;
+}
+
+function kbMarkDirty() {
+  _kb.dirty = true;
+  const bar = document.getElementById("kb-save-bar");
+  if (bar) bar.style.display = "";
+}
+
+function kbAddSection() {
+  _kb.sections.push({ title: "", body: "", _editing: true });
+  kbMarkDirty();
+  kbRenderSections();
+  const t = document.getElementById(`kb-edit-title-${_kb.sections.length - 1}`);
+  if (t) t.focus();
+}
+
+function kbToggleSection(i) {
+  _kb.sections[i]._collapsed = !_kb.sections[i]._collapsed;
+  kbRenderSections();
+}
+
+function kbEditSection(i) {
+  _kb.sections[i]._editing = true;
+  kbRenderSections();
+}
+
+function kbSaveSectionEdit(i) {
+  const title = document.getElementById(`kb-edit-title-${i}`).value.trim();
+  const body = document.getElementById(`kb-edit-body-${i}`).value.trim();
+  if (!title && !body) { toast("Section is empty — add content or delete it.", "error"); return; }
+  _kb.sections[i] = { title, body };
+  kbMarkDirty();
+  kbRenderSections();
+}
+
+function kbCancelSectionEdit(i) {
+  const s = _kb.sections[i];
+  if (!s.title && !s.body) _kb.sections.splice(i, 1); // cancel on a brand-new empty section removes it
+  else s._editing = false;
+  kbRenderSections();
+}
+
+function kbDeleteSection(i) {
+  const s = _kb.sections[i];
+  if (!confirm(`Delete section "${s.title || "Untitled"}"? (Applied when you save the new version — previous versions keep it.)`)) return;
+  _kb.sections.splice(i, 1);
+  kbMarkDirty();
+  kbRenderSections();
+}
+
+function kbMoveSection(i, dir) {
+  const j = i + dir;
+  if (j < 0 || j >= _kb.sections.length) return;
+  const tmp = _kb.sections[i];
+  _kb.sections[i] = _kb.sections[j];
+  _kb.sections[j] = tmp;
+  kbMarkDirty();
+  kbRenderSections();
+}
+
+// Toolbar formatting — wraps the textarea selection with lightweight markup
+// (bold / bullet list / link). Stored as plain text; rendered formatted.
+function kbFormat(i, kind) {
+  const ta = document.getElementById(`kb-edit-body-${i}`);
+  if (!ta) return;
+  const start = ta.selectionStart, end = ta.selectionEnd;
+  const sel = ta.value.slice(start, end);
+  if (kind === "bold") {
+    ta.setRangeText(`**${sel || "bold text"}**`, start, end, "end");
+  } else if (kind === "list") {
+    ta.setRangeText((sel || "item").split("\n").map(l => `- ${l}`).join("\n"), start, end, "end");
+  } else if (kind === "link") {
+    const url = prompt("Link URL:", "https://");
+    if (!url) return;
+    ta.setRangeText(`[${sel || "link text"}](${url})`, start, end, "end");
+  }
+  ta.focus();
+}
+
+async function kbSaveVersion() {
+  const summary = document.getElementById("kb-change-summary").value.trim();
+  if (!summary) { toast("Please add a change summary — it becomes the version's history entry.", "error"); return; }
+  const btn = document.getElementById("kb-save-btn");
+  btn.disabled = true;
+  btn.textContent = "Saving...";
+  try {
+    const sections = _kb.sections.map(s => ({ title: s.title, body: s.body }));
+    const res = await api("save_kb_sections", { org_id: _kb.orgId, sections, change_summary: summary });
+    toast(`Knowledge base saved as v${res.version}`, "success");
+    await kbRefresh();
+  } catch (e) {
+    toast(e.message, "error");
+    btn.disabled = false;
+    btn.textContent = "Save as New Version";
+  }
+}
+
+async function kbRefresh() {
+  const data = await api("get_org", { org_id: currentOrgId });
+  window._orgData = data;
+  renderKbTab(document.getElementById("tab-content"), null, data.org);
+}
+
+// ── Version history ───────────────────────────────────────────────────────────
+
+function kbVersionHistoryHtml(versions) {
+  if (versions.length === 0) return "";
+  const rows = versions.map(v => `
+    <tr>
+      <td><span class="badge badge-blue">v${v.version}</span></td>
+      <td>${escHtml(v.change_summary || "—")}</td>
+      <td class="text-sm text-muted">${escHtml(v.created_by_name || v.source)}</td>
+      <td class="text-sm text-muted">${new Date(v.created_at).toLocaleString()}</td>
+      <td class="table-actions">
+        <button class="btn btn-ghost btn-sm" onclick="kbViewVersion('${v.id}', ${v.version})">View</button>
+        <button class="btn btn-ghost btn-sm" onclick="kbRollback('${v.id}', ${v.version})">Rollback</button>
+      </td>
+    </tr>`).join("");
+  return `
+    <div class="card" style="margin-top:16px">
+      <div class="card-header"><div class="card-title">Version History</div></div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Title</th><th>Format</th><th>Status</th><th>Added</th><th></th></tr></thead>
+          <thead><tr><th>Version</th><th>Change</th><th>By</th><th>When</th><th></th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div>
     </div>`;
 }
 
-function showAddKbModal(existingId = null, existingTitle = "", existingFormat = "markdown") {
-  const isEdit = !!existingId;
-  const modal = document.createElement("div");
-  modal.className = "modal-backdrop";
-  modal.innerHTML = `
-    <div class="modal">
-      <div class="modal-header">
-        <div class="modal-title">${isEdit ? "Update Document" : "Add Document"}</div>
-        <button class="btn btn-ghost btn-sm" onclick="this.closest('.modal-backdrop').remove()">✕</button>
-      </div>
-      <div class="modal-body">
-        <div class="form-row">
-          <div class="form-group">
-            <label>Title</label>
-            <input type="text" id="kb-title" value="${escHtml(existingTitle)}" placeholder="Pricing FAQ" />
-          </div>
-          <div class="form-group">
-            <label>Format</label>
-            <select id="kb-format" onchange="toggleKbFormat(this.value)">
-              <option value="markdown" ${existingFormat==="markdown"?"selected":""}>Markdown / Plain Text</option>
-              <option value="faq" ${existingFormat==="json"?"selected":""}>FAQ (Q&A pairs)</option>
-            </select>
-          </div>
+async function kbViewVersion(versionId, versionNum) {
+  try {
+    const { version } = await api("get_kb_version", { org_id: currentOrgId, version_id: versionId });
+    const sections = (version.sections || []).map(s => `
+      <div style="margin-bottom:16px">
+        <div style="font-weight:600;margin-bottom:4px">${escHtml(s.title || "Untitled section")}</div>
+        <div class="text-sm">${kbFormatBody(s.body || "")}</div>
+      </div>`).join("");
+    const modal = document.createElement("div");
+    modal.className = "modal-backdrop";
+    modal.innerHTML = `
+      <div class="modal" style="max-width:720px">
+        <div class="modal-header">
+          <div class="modal-title">Knowledge Base — v${versionNum}</div>
+          <button class="btn btn-ghost btn-sm" onclick="this.closest('.modal-backdrop').remove()">✕</button>
         </div>
-        <div id="kb-markdown-section">
-          <div class="form-group">
-            <label>Content <span class="hint">(## headings create separate chunks)</span></label>
-            <textarea id="kb-content" rows="14" placeholder="## Section Title&#10;&#10;Content here..."></textarea>
-          </div>
-        </div>
-        <div id="kb-faq-section" style="display:none">
-          <div class="form-group">
-            <label>FAQ Pairs <span class="hint">(JSON array)</span></label>
-            <textarea id="kb-faq-content" rows="14" placeholder='[&#10;  { "question": "...", "answer": "..." }&#10;]'></textarea>
-          </div>
-        </div>
-        <div id="kb-modal-error"></div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn btn-secondary" onclick="this.closest('.modal-backdrop').remove()">Cancel</button>
-        <button class="btn btn-primary" id="kb-submit-btn" onclick="submitKbDoc(${isEdit ? `'${existingId}'` : "null"})">
-          ${isEdit ? "Update" : "Add Document"}
-        </button>
+        <div class="modal-body">${sections || '<p class="text-muted">Empty version.</p>'}</div>
+      </div>`;
+    document.body.appendChild(modal);
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function kbRollback(versionId, versionNum) {
+  if (!confirm(`Roll back to v${versionNum}?\n\nThis does NOT delete history — it creates a new version copying v${versionNum}'s content and makes it live.`)) return;
+  try {
+    const res = await api("rollback_kb_version", { org_id: currentOrgId, version_id: versionId });
+    toast(`Rolled back to v${versionNum} — now live as v${res.version}`, "success");
+    await kbRefresh();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+// ── Amend requests (customer-submitted KB changes, employee review) ───────────
+
+function kbAmendRequestsHtml(requests) {
+  const pending = requests.filter(r => r.status === "pending");
+  if (pending.length === 0) return "";
+  const rows = pending.map(r => `
+    <tr>
+      <td>
+        <div class="font-semibold">${escHtml(r.title)}</div>
+        <div class="text-sm text-muted" style="white-space:pre-wrap">${escHtml(r.content)}</div>
+      </td>
+      <td class="text-sm text-muted">${new Date(r.created_at).toLocaleDateString()}</td>
+      <td class="table-actions">
+        <button class="btn btn-primary btn-sm" onclick="kbReviewAmend('${r.id}','apply')">Apply</button>
+        <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="kbReviewAmend('${r.id}','dismiss')">Dismiss</button>
+      </td>
+    </tr>`).join("");
+  return `
+    <div class="card" style="margin-top:16px">
+      <div class="card-header"><div class="card-title">Amend Requests (${pending.length} pending)</div></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Request</th><th>Submitted</th><th></th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
       </div>
     </div>`;
-  document.body.appendChild(modal);
 }
 
-async function showEditKbModal(id) {
-  const doc = (window._orgData?.kbDocs || []).find(d => d.id === id);
-  const format = doc?.file_type || "";
-  showAddKbModal(id, doc?.title || "", format);
-  try {
-    const { chunks } = await api("get_kb_chunks", { org_id: currentOrgId, doc_id: id });
-    if (format === "json") {
-      const pairs = chunks.map(c => {
-        const lines = c.content.split("\n");
-        const q = lines.find(l => l.startsWith("Q: "))?.slice(3) ?? "";
-        const a = lines.find(l => l.startsWith("A: "))?.slice(3) ?? "";
-        return { question: q, answer: a };
-      });
-      const ta = document.getElementById("kb-faq-content");
-      if (ta) ta.value = JSON.stringify(pairs, null, 2);
-      toggleKbFormat("faq");
-      document.getElementById("kb-format").value = "faq";
-    } else {
-      const content = chunks.map(c => c.content).join("\n\n");
-      const ta = document.getElementById("kb-content");
-      if (ta) ta.value = content;
-    }
-  } catch (e) { toast(`Failed to load content: ${e.message}`, "error"); }
-}
-
-function toggleKbFormat(format) {
-  document.getElementById("kb-markdown-section").style.display = format === "markdown" ? "" : "none";
-  document.getElementById("kb-faq-section").style.display = format === "faq" ? "" : "none";
-}
-
-async function submitKbDoc(existingId) {
-  const title = document.getElementById("kb-title").value.trim();
-  const format = document.getElementById("kb-format").value;
-  const errEl = document.getElementById("kb-modal-error");
-
-  if (!title) { errEl.innerHTML = '<div class="alert alert-danger">Title is required.</div>'; return; }
-
-  let content;
-  if (format === "markdown") {
-    content = document.getElementById("kb-content").value.trim();
-    if (!content) { errEl.innerHTML = '<div class="alert alert-danger">Content is required.</div>'; return; }
+async function kbReviewAmend(requestId, action) {
+  let reviewer_notes = null;
+  if (action === "apply") {
+    if (!confirm("Apply this request? It will be appended to the knowledge base as a new section, in a new version.")) return;
   } else {
-    try {
-      content = JSON.parse(document.getElementById("kb-faq-content").value.trim());
-      if (!Array.isArray(content)) throw new Error("Must be an array");
-    } catch (e) {
-      errEl.innerHTML = `<div class="alert alert-danger">Invalid JSON: ${escHtml(e.message)}</div>`;
-      return;
-    }
+    reviewer_notes = prompt("Reason for dismissing (optional — cancel to abort):");
+    if (reviewer_notes === null) return;
+    if (!reviewer_notes.trim()) reviewer_notes = null;
   }
-
-  const btn = document.getElementById("kb-submit-btn");
-  btn.disabled = true;
-  btn.innerHTML = '<div class="spinner"></div> Saving...';
-
   try {
-    const payload = { org_id: currentOrgId, title, format, content };
-    if (existingId) payload.id = existingId;
-
-    const result = await api("kb_ingest", payload);
-    document.querySelector(".modal-backdrop")?.remove();
-    toast(`${result.chunks_created} chunks ${existingId ? "updated" : "added"}`, "success");
-
-    const { org, providers, widget, kbDocs, lastPayment, integrations } = await api("get_org", { org_id: currentOrgId });
-    window._orgData = { org, providers, widget, kbDocs, lastPayment, integrations };
-    renderKbTab(document.getElementById("tab-content"), kbDocs, org);
-  } catch (e) {
-    errEl.innerHTML = `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
-    btn.disabled = false;
-    btn.innerHTML = existingId ? "Update" : "Add Document";
-  }
+    const res = await api("review_kb_amend", { org_id: currentOrgId, request_id: requestId, action, reviewer_notes });
+    toast(action === "apply" ? `Applied — now live as v${res.version}` : "Request dismissed", "success");
+    await kbRefresh();
+  } catch (e) { toast(e.message, "error"); }
 }
 
-async function deleteKbDoc(docId) {
-  const title = (window._orgData?.kbDocs || []).find(d => d.id === docId)?.title || "this document";
-  if (!confirm(`Delete "${title}"? This removes all chunks and cannot be undone.`)) return;
-  try {
-    await api("delete_kb_doc", { org_id: currentOrgId, doc_id: docId });
-    toast("Document deleted", "success");
-    const { kbDocs } = await api("get_org", { org_id: currentOrgId });
-    window._orgData.kbDocs = kbDocs;
-    renderKbTab(document.getElementById("tab-content"), kbDocs, window._orgData.org);
-  } catch (e) { toast(e.message, "error"); }
+// ── Lightweight body renderer ─────────────────────────────────────────────────
+// Plain-text sections may contain **bold**, *italic*, `code`, [links](url) and
+// "- " bullet lines (inserted via the editor toolbar). Rendered formatted here;
+// the raw markup is never shown to the user as editable syntax.
+function kbFormatBody(text) {
+  const esc = escHtml(text || "");
+  const inline = esc
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*([^*\n]+)\*/g, "<em>$1</em>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  const lines = inline.split("\n");
+  let out = "", inList = false;
+  for (const line of lines) {
+    if (line.trimStart().startsWith("- ")) {
+      if (!inList) { out += "<ul style='margin:4px 0;padding-left:20px'>"; inList = true; }
+      out += `<li>${line.trimStart().slice(2)}</li>`;
+    } else {
+      if (inList) { out += "</ul>"; inList = false; }
+      out += line ? line + "<br>" : "<br>";
+    }
+  }
+  if (inList) out += "</ul>";
+  return out;
 }
 
 // ── Integrations Tab ─────────────────────────────────────────────────────────

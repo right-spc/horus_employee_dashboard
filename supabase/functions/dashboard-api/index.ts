@@ -34,9 +34,10 @@
   // Table → schema lookup for the dynamic delete loops (tables moved out of public 2026-09-07).
   const TABLE_SCHEMA: Record<string, string> = {
     organizations: "core", organization_members: "core", dashboard_users: "core", customer_users: "core", widget_configs: "core", demo_defaults: "core",
+    clients: "core", client_members: "core",
     contacts: "crm", contact_aliases: "crm",
     conversations: "messaging", messages: "messaging", conversation_merges: "messaging", delivery_queue: "messaging", widget_surveys: "messaging",
-    kb_documents: "kb", kb_chunks: "kb", kb_amend_requests: "kb",
+    kb_amend_requests: "kb", kb_versions: "kb",
     business_profiles: "business", business_services: "business", business_hours: "business", business_staff: "business",
     email_providers: "comms", integrations: "comms", notification_recipients: "comms", export_schedules: "comms",
     payment_history: "billing", credit_cycle_history: "billing",
@@ -206,6 +207,44 @@
           return ok({ orgs: data, providers: providers || [], widgets: widgets || [] });
         }
 
+        // ── List clients with their organizations ───────────────────────────
+        case "list_clients": {
+          if (!isOwner) return err("Only owners can list clients", 403);
+
+          const [
+            { data: clients, error: clientsErr },
+            { data: members, error: membersErr },
+            { data: orgs, error: orgsErr },
+          ] = await Promise.all([
+            adminClient.schema("core").from("clients")
+              .select("id, name, notes, owner_id, created_at")
+              .order("name"),
+            adminClient.schema("core").from("client_members")
+              .select("client_id, email, role"),
+            adminClient.schema("core").from("organizations")
+              .select("id, name, slug, client_id, subscription_status, subscription_end_date")
+              .eq("is_demo", false)
+              .order("name"),
+          ]);
+          if (clientsErr) throw clientsErr;
+          if (membersErr) throw membersErr;
+          if (orgsErr) throw orgsErr;
+
+          // Owner display (email) for each client's owner_id
+          const ownerIds = [...new Set((clients || []).map(c => c.owner_id).filter(Boolean))];
+          let owners: Array<{ id: string; email: string }> = [];
+          if (ownerIds.length > 0) {
+            const { data: ownerRows, error: ownersErr } = await adminClient
+              .schema("core").from("customer_users")
+              .select("id, email")
+              .in("id", ownerIds);
+            if (ownersErr) throw ownersErr;
+            owners = ownerRows || [];
+          }
+
+          return ok({ clients: clients || [], members: members || [], orgs: orgs || [], owners });
+        }
+
         // ── Get single org ──────────────────────────────────────────────────
         case "get_org": {
           const { org_id } = body;
@@ -217,16 +256,11 @@
             { data: org, error: orgErr },
             { data: providers },
             { data: widget },
-            { data: kbDocs },
             { data: lastPayment },
           ] = await Promise.all([
             adminClient.schema("core").from("organizations").select("*").eq("id", org_id).single(),
             adminClient.schema("comms").from("email_providers").select("*").eq("organization_id", org_id),
             adminClient.schema("core").from("widget_configs").select("*").eq("organization_id", org_id).maybeSingle(),
-            adminClient.schema("kb").from("kb_documents")
-              .select("id, title, file_type, status, created_at")
-              .eq("organization_id", org_id)
-              .order("created_at", { ascending: false }),
             adminClient.schema("billing").from("payment_history")
               .select("created_at, category, amount")
               .eq("organization_id", org_id)
@@ -238,7 +272,29 @@
 
           if (orgErr) throw orgErr;
 
-          return ok({ org, providers: providers || [], widget, kbDocs: kbDocs || [], lastPayment });
+          // kbDocs shim: the org now has ONE whole-KB version history. Expose
+          // the active version as a single pseudo-document so the existing KB
+          // tab keeps working until the Phase 2 sections-editor rewrite.
+          let kbDocs: Array<Record<string, unknown>> = [];
+          if (org?.active_kb_version_id) {
+            const { data: activeVersion } = await adminClient
+              .schema("kb").from("kb_versions")
+              .select("id, version, created_at")
+              .eq("id", org.active_kb_version_id)
+              .single();
+            if (activeVersion) {
+              kbDocs = [{
+                id: activeVersion.id,
+                title: "Knowledge Base",
+                file_type: "markdown",
+                status: "ready",
+                created_at: activeVersion.created_at,
+                version: activeVersion.version,
+              }];
+            }
+          }
+
+          return ok({ org, providers: providers || [], widget, kbDocs, lastPayment });
         }
 
         // ── Create org ──────────────────────────────────────────────────────
@@ -407,16 +463,12 @@
           return ok({ url: data.url });
         }
 
-        // ── KB ingest ───────────────────────────────────────────────────────
+        // ── KB ingest (proxied to kb-ingest, which creates a new KB version) ──
         case "kb_ingest": {
           const { org_id, ...payload } = body as Record<string, unknown>;
           if (!org_id) return err("Missing org_id", 400);
 
           await assertOrgAccess(adminClient, dashUser, org_id as string);
-
-          console.log("kb_ingest payload keys:", Object.keys({ ...payload, organization_id: org_id }));
-          console.log("kb_ingest content type:", typeof payload.content);
-          console.log("kb_ingest content length:", JSON.stringify({ ...payload, organization_id: org_id }).length);
 
           const res = await fetch(`${SUPA_URL}/functions/v1/kb-ingest`, {
             method: "POST",
@@ -425,7 +477,13 @@
               "x-internal-secret": Deno.env.get("INTERNAL_API_SECRET") ?? "",
               "Content-Type": "application/json",
             },
-            body: JSON.stringify({ ...payload, organization_id: org_id }),
+            body: JSON.stringify({
+              ...payload,
+              organization_id: org_id,
+              source: "dashboard",
+              created_by: dashUser.id,
+              created_by_name: dashUser.display_name,
+            }),
           });
 
           const responseText = await res.text();
@@ -446,31 +504,268 @@
 
           await assertOrgAccess(adminClient, dashUser, org_id as string);
 
-          const { error } = await adminClient
-            .schema("kb").from("kb_documents")
-            .delete()
+          // Versioned KB rows are immutable history — they cannot be deleted.
+          const { data: versionRow } = await adminClient
+            .schema("kb").from("kb_versions")
+            .select("id")
             .eq("id", doc_id)
-            .eq("organization_id", org_id); // Safety: ensure doc belongs to org
+            .maybeSingle();
+          if (versionRow) {
+            return err("The versioned knowledge base cannot be deleted — edit it (creates a new version) or roll back to a previous version instead.", 400);
+          }
 
-          if (error) throw error;
-          return ok({ success: true });
+          return err("Legacy KB documents were retired in the versioned-KB migration — nothing to delete.", 400);
         }
 
-        // ── Get KB chunks (for edit modal) ──────────────────────────────────
+        // ── Get KB content (legacy shape, kept for compatibility) ───────────
+        // doc_id is the KB VERSION id. Sections are returned chunk-shaped.
         case "get_kb_chunks": {
           const { org_id, doc_id } = body;
           if (!org_id || !doc_id) return err("Missing org_id or doc_id", 400);
 
           await assertOrgAccess(adminClient, dashUser, org_id as string);
 
+          const { data: version, error } = await adminClient
+            .schema("kb").from("kb_versions")
+            .select("id, sections")
+            .eq("id", doc_id)
+            .eq("organization_id", org_id)
+            .single();
+
+          if (error || !version) return err("KB version not found", 404);
+
+          const sections = (version.sections as Array<{ title?: string; body?: string }>) || [];
+          const chunks = sections.map((s, i) => ({
+            content: s.title ? `## ${s.title}\n\n${s.body ?? ""}` : (s.body ?? ""),
+            chunk_index: i,
+          }));
+          return ok({ chunks });
+        }
+
+        // ── List KB versions (history) ──────────────────────────────────────
+        case "list_kb_versions": {
+          const { org_id } = body;
+          if (!org_id) return err("Missing org_id", 400);
+
+          await assertOrgAccess(adminClient, dashUser, org_id as string);
+
           const { data, error } = await adminClient
-            .schema("kb").from("kb_chunks")
-            .select("content, chunk_index")
-            .eq("document_id", doc_id)
-            .order("chunk_index", { ascending: true });
+            .schema("kb").from("kb_versions")
+            .select("id, version, change_summary, source, created_by_name, created_at")
+            .eq("organization_id", org_id)
+            .order("version", { ascending: false });
 
           if (error) throw error;
-          return ok({ chunks: data });
+          return ok({ versions: data || [] });
+        }
+
+        // ── Get one KB version (full sections) ──────────────────────────────
+        case "get_kb_version": {
+          const { org_id, version_id } = body;
+          if (!org_id || !version_id) return err("Missing org_id or version_id", 400);
+
+          await assertOrgAccess(adminClient, dashUser, org_id as string);
+
+          const { data, error } = await adminClient
+            .schema("kb").from("kb_versions")
+            .select("id, version, sections, change_summary, source, created_by_name, created_at")
+            .eq("id", version_id)
+            .eq("organization_id", org_id)
+            .single();
+
+          if (error || !data) return err("KB version not found", 404);
+          return ok({ version: data });
+        }
+
+        // ── Save KB sections as a new version (sections editor) ─────────────
+        case "save_kb_sections": {
+          const { org_id, sections, change_summary } = body as {
+            org_id?: string;
+            sections?: Array<{ title?: string; body?: string }>;
+            change_summary?: string;
+          };
+          if (!org_id || !Array.isArray(sections)) return err("Missing org_id or sections", 400);
+
+          await assertOrgAccess(adminClient, dashUser, org_id as string);
+
+          const clean = sections
+            .map(s => ({ title: String(s?.title ?? "").trim(), body: String(s?.body ?? "").trim() }))
+            .filter(s => s.title || s.body);
+
+          const { data: maxRow } = await adminClient
+            .schema("kb").from("kb_versions")
+            .select("version")
+            .eq("organization_id", org_id)
+            .order("version", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          const { data: newVersion, error } = await adminClient
+            .schema("kb").from("kb_versions")
+            .insert({
+              organization_id: org_id,
+              version: (maxRow?.version ?? 0) + 1,
+              sections: clean,
+              change_summary: change_summary?.trim() || "Edited knowledge base",
+              source: "dashboard",
+              created_by: dashUser.id,
+              created_by_name: dashUser.display_name,
+            })
+            .select("id, version")
+            .single();
+          if (error) throw error;
+
+          await adminClient.schema("core").from("organizations")
+            .update({ active_kb_version_id: newVersion.id })
+            .eq("id", org_id);
+
+          return ok({ version_id: newVersion.id, version: newVersion.version });
+        }
+
+        // ── Rollback: new version copying an old version's sections ─────────
+        // The pointer never moves backwards — history stays append-only.
+        case "rollback_kb_version": {
+          const { org_id, version_id } = body;
+          if (!org_id || !version_id) return err("Missing org_id or version_id", 400);
+
+          await assertOrgAccess(adminClient, dashUser, org_id as string);
+
+          const { data: target, error: targetErr } = await adminClient
+            .schema("kb").from("kb_versions")
+            .select("version, sections")
+            .eq("id", version_id)
+            .eq("organization_id", org_id)
+            .single();
+          if (targetErr || !target) return err("KB version not found", 404);
+
+          const { data: maxRow } = await adminClient
+            .schema("kb").from("kb_versions")
+            .select("version")
+            .eq("organization_id", org_id)
+            .order("version", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          const { data: newVersion, error } = await adminClient
+            .schema("kb").from("kb_versions")
+            .insert({
+              organization_id: org_id,
+              version: (maxRow?.version ?? 0) + 1,
+              sections: target.sections,
+              change_summary: `Rollback to v${target.version}`,
+              source: "dashboard",
+              created_by: dashUser.id,
+              created_by_name: dashUser.display_name,
+            })
+            .select("id, version")
+            .single();
+          if (error) throw error;
+
+          await adminClient.schema("core").from("organizations")
+            .update({ active_kb_version_id: newVersion.id })
+            .eq("id", org_id);
+
+          return ok({ version_id: newVersion.id, version: newVersion.version });
+        }
+
+        // ── List KB amend requests (employee review) ────────────────────────
+        case "list_kb_amend_requests": {
+          const { org_id } = body;
+          if (!org_id) return err("Missing org_id", 400);
+
+          await assertOrgAccess(adminClient, dashUser, org_id as string);
+
+          const { data, error } = await adminClient
+            .schema("kb").from("kb_amend_requests")
+            .select("id, title, content, status, reviewer_notes, created_at")
+            .eq("organization_id", org_id)
+            .order("created_at", { ascending: false });
+
+          if (error) throw error;
+          return ok({ requests: data || [] });
+        }
+
+        // ── Review a KB amend request (apply → new version, or dismiss) ─────
+        case "review_kb_amend": {
+          const { org_id, request_id, action, reviewer_notes } = body as {
+            org_id?: string; request_id?: string; action?: string; reviewer_notes?: string;
+          };
+          if (!org_id || !request_id) return err("Missing org_id or request_id", 400);
+          if (action !== "apply" && action !== "dismiss") return err("action must be 'apply' or 'dismiss'", 400);
+
+          await assertOrgAccess(adminClient, dashUser, org_id as string);
+
+          const { data: request, error: reqErr } = await adminClient
+            .schema("kb").from("kb_amend_requests")
+            .select("id, title, content, status")
+            .eq("id", request_id)
+            .eq("organization_id", org_id)
+            .single();
+          if (reqErr || !request) return err("Amend request not found", 404);
+          if (request.status !== "pending") return err("Request already reviewed", 400);
+
+          if (action === "dismiss") {
+            const { error } = await adminClient
+              .schema("kb").from("kb_amend_requests")
+              .update({ status: "dismissed", reviewer_notes: reviewer_notes || null })
+              .eq("id", request_id);
+            if (error) throw error;
+            return ok({ success: true });
+          }
+
+          // Apply: append the request as a new section in a new version
+          const { data: org } = await adminClient
+            .schema("core").from("organizations")
+            .select("active_kb_version_id")
+            .eq("id", org_id)
+            .single();
+
+          let currentSections: unknown[] = [];
+          if (org?.active_kb_version_id) {
+            const { data: activeVersion } = await adminClient
+              .schema("kb").from("kb_versions")
+              .select("sections")
+              .eq("id", org.active_kb_version_id)
+              .single();
+            currentSections = (activeVersion?.sections as unknown[]) || [];
+          }
+
+          const { data: maxRow } = await adminClient
+            .schema("kb").from("kb_versions")
+            .select("version")
+            .eq("organization_id", org_id)
+            .order("version", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+
+          const { data: newVersion, error } = await adminClient
+            .schema("kb").from("kb_versions")
+            .insert({
+              organization_id: org_id,
+              version: (maxRow?.version ?? 0) + 1,
+              sections: [...currentSections, { title: request.title, body: request.content }],
+              change_summary: `Applied amend request: ${request.title}`,
+              source: "customer_amend",
+              created_by: dashUser.id,
+              created_by_name: dashUser.display_name,
+            })
+            .select("id, version")
+            .single();
+          if (error) throw error;
+
+          await adminClient.schema("core").from("organizations")
+            .update({ active_kb_version_id: newVersion.id })
+            .eq("id", org_id);
+
+          await adminClient.schema("kb").from("kb_amend_requests")
+            .update({
+              status: "applied",
+              applied_version_id: newVersion.id,
+              reviewer_notes: reviewer_notes || null,
+            })
+            .eq("id", request_id);
+
+          return ok({ version_id: newVersion.id, version: newVersion.version });
         }
 
         // ── Reset usage ─────────────────────────────────────────────────────
@@ -948,29 +1243,58 @@
             if (wErr) throw wErr;
           }
 
-          // 3. Reset KB: delete existing, re-ingest from defaults
-          await adminClient.schema("kb").from("kb_chunks").delete().eq("organization_id", org_id);
-          await adminClient.schema("kb").from("kb_documents").delete().eq("organization_id", org_id);
+          // 3. Reset KB: demo orgs get a fresh v1 from defaults (versioned KB)
+          await adminClient.schema("kb").from("kb_versions").delete().eq("organization_id", org_id);
+          await adminClient.schema("core").from("organizations")
+            .update({ active_kb_version_id: null }).eq("id", org_id);
+          // (legacy kb_chunks/kb_documents tables were dropped after the
+          // versioned-KB migration — nothing to clean up there)
 
-          const kbDefaults = (defaults.kb_defaults as Array<{ title: string; format: string; content: unknown }>) || [];
-          for (const doc of kbDefaults) {
-            const res = await fetch(`${SUPA_URL}/functions/v1/kb-ingest`, {
-              method: "POST",
-              headers: {
-                "Authorization": `Bearer ${SUPA_SERVICE_KEY}`,
-                "x-internal-secret": Deno.env.get("INTERNAL_API_SECRET") ?? "",
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                organization_id: org_id,
-                title: doc.title,
-                format: doc.format,
-                content: doc.content,
-              }),
-            });
-            if (!res.ok) {
-              const errText = await res.text();
-              console.error("kb-ingest failed during reset:", errText);
+          const kbDefaultsRaw = defaults.kb_defaults as unknown;
+          if (kbDefaultsRaw && !Array.isArray(kbDefaultsRaw) && Array.isArray((kbDefaultsRaw as { sections?: unknown }).sections)) {
+            // New format: { sections } → insert v1 directly
+            const sections = (kbDefaultsRaw as { sections: unknown[] }).sections;
+            if (sections.length > 0) {
+              const { data: v1 } = await adminClient
+                .schema("kb").from("kb_versions")
+                .insert({
+                  organization_id: org_id,
+                  version: 1,
+                  sections,
+                  change_summary: "Reset to demo defaults",
+                  source: "template",
+                })
+                .select("id")
+                .single();
+              if (v1) {
+                await adminClient.schema("core").from("organizations")
+                  .update({ active_kb_version_id: v1.id }).eq("id", org_id);
+              }
+            }
+          } else {
+            // Legacy format: array of {title, format, content} → append via kb-ingest
+            const kbDefaults = (kbDefaultsRaw as Array<{ title: string; format: string; content: unknown }>) || [];
+            for (const doc of kbDefaults) {
+              const res = await fetch(`${SUPA_URL}/functions/v1/kb-ingest`, {
+                method: "POST",
+                headers: {
+                  "Authorization": `Bearer ${SUPA_SERVICE_KEY}`,
+                  "x-internal-secret": Deno.env.get("INTERNAL_API_SECRET") ?? "",
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                  organization_id: org_id,
+                  title: doc.title,
+                  format: doc.format,
+                  content: doc.content,
+                  source: "template",
+                  change_summary: "Reset to demo defaults",
+                }),
+              });
+              if (!res.ok) {
+                const txt = await res.text();
+                console.error(`reset_demo: kb-ingest failed for ${doc.title}:`, txt);
+              }
             }
           }
 
@@ -1000,32 +1324,15 @@
             .eq("organization_id", org_id)
             .maybeSingle();
 
-          // Fetch current KB docs + chunks
-          const { data: kbDocs } = await adminClient
-            .schema("kb").from("kb_documents")
-            .select("id, title, file_type")
-            .eq("organization_id", org_id);
-
-          const kbDefaults: Array<{ title: string; format: string; content: unknown }> = [];
-          for (const doc of (kbDocs || [])) {
-            const { data: chunks } = await adminClient
-              .schema("kb").from("kb_chunks")
-              .select("content, chunk_index")
-              .eq("document_id", doc.id)
-              .order("chunk_index", { ascending: true });
-
-            if (doc.file_type === "json") {
-              const faqItems = (chunks || []).map(c => {
-                const lines = c.content.split("\n");
-                const q = lines.find((l: string) => l.startsWith("Q: "))?.slice(3) ?? "";
-                const a = lines.find((l: string) => l.startsWith("A: "))?.slice(3) ?? "";
-                return { question: q, answer: a };
-              });
-              kbDefaults.push({ title: doc.title, format: "faq", content: faqItems });
-            } else {
-              const content = (chunks || []).map(c => c.content).join("\n\n");
-              kbDefaults.push({ title: doc.title, format: "markdown", content });
-            }
+          // Snapshot the active KB version's sections (whole-KB model)
+          let kbDefaults: unknown = { sections: [] };
+          if (org.active_kb_version_id) {
+            const { data: activeVersion } = await adminClient
+              .schema("kb").from("kb_versions")
+              .select("sections")
+              .eq("id", org.active_kb_version_id)
+              .single();
+            kbDefaults = { sections: (activeVersion?.sections as unknown) || [] };
           }
 
           // Strip widget fields that shouldn't be in defaults
@@ -1077,13 +1384,11 @@
           }
 
           // Delete child rows in dependency order. FK ON DELETE behavior is
-          // not guaranteed across the schema (reset_demo also cleans
-          // kb_chunks/kb_documents manually for the same reason), so we delete
-          // defensively. Per-table errors are logged and skipped — most demos
+          // not guaranteed across the schema, so we delete defensively.
+          // Per-table errors are logged and skipped — most demos
           // won't have rows in most of these tables.
           const childTables = [
-            "kb_chunks",
-            "kb_documents",
+            "kb_versions",
             "kb_amend_requests",
             "demo_defaults",
             "widget_surveys",
@@ -1157,8 +1462,7 @@
           // errors are logged and skipped — most orgs won't have rows in
           // every table.
           const childTables = [
-            "kb_chunks",
-            "kb_documents",
+            "kb_versions",
             "kb_amend_requests",
             "demo_defaults",
             "widget_surveys",
@@ -1276,50 +1580,67 @@
             }
           }
 
-          // Copy KB docs (additive — does not delete existing docs).
-          // Rebuild each doc from its live kb_chunks in the same shape kb-ingest expects.
+          // Copy KB (additive — appended as a new version on the target).
           if (copy_kb) {
-            const { data: kbDocs } = await adminClient
-              .schema("kb").from("kb_documents")
-              .select("id, title, file_type")
-              .eq("organization_id", demo_org_id);
+            const { data: demoOrg } = await adminClient
+              .schema("core").from("organizations")
+              .select("active_kb_version_id")
+              .eq("id", demo_org_id)
+              .single();
 
-            for (const doc of (kbDocs || [])) {
-              const { data: chunks } = await adminClient
-                .schema("kb").from("kb_chunks")
-                .select("content, chunk_index")
-                .eq("document_id", doc.id)
-                .order("chunk_index", { ascending: true });
+            if (demoOrg?.active_kb_version_id) {
+              const { data: demoVersion } = await adminClient
+                .schema("kb").from("kb_versions")
+                .select("sections")
+                .eq("id", demoOrg.active_kb_version_id)
+                .single();
 
-              let format: "markdown" | "faq";
-              let content: unknown;
-              if (doc.file_type === "json") {
-                format = "faq";
-                content = (chunks || []).map(c => {
-                  const lines = c.content.split("\n");
-                  const q = lines.find((l: string) => l.startsWith("Q: "))?.slice(3) ?? "";
-                  const a = lines.find((l: string) => l.startsWith("A: "))?.slice(3) ?? "";
-                  return { question: q, answer: a };
-                });
-              } else {
-                format = "markdown";
-                content = (chunks || []).map(c => c.content).join("\n\n");
+              const demoSections = (demoVersion?.sections as unknown[]) || [];
+              if (demoSections.length > 0) {
+                // Current target sections (if any)
+                let targetSections: unknown[] = [];
+                const { data: targetOrg } = await adminClient
+                  .schema("core").from("organizations")
+                  .select("active_kb_version_id")
+                  .eq("id", target_org_id)
+                  .single();
+                if (targetOrg?.active_kb_version_id) {
+                  const { data: targetVersion } = await adminClient
+                    .schema("kb").from("kb_versions")
+                    .select("sections")
+                    .eq("id", targetOrg.active_kb_version_id)
+                    .single();
+                  targetSections = (targetVersion?.sections as unknown[]) || [];
+                }
+
+                const { data: maxRow } = await adminClient
+                  .schema("kb").from("kb_versions")
+                  .select("version")
+                  .eq("organization_id", target_org_id)
+                  .order("version", { ascending: false })
+                  .limit(1)
+                  .maybeSingle();
+
+                const { data: newVersion } = await adminClient
+                  .schema("kb").from("kb_versions")
+                  .insert({
+                    organization_id: target_org_id,
+                    version: (maxRow?.version ?? 0) + 1,
+                    sections: [...targetSections, ...demoSections],
+                    change_summary: "Copied KB from demo template",
+                    source: "template",
+                    created_by: dashUser.id,
+                    created_by_name: dashUser.display_name,
+                  })
+                  .select("id")
+                  .single();
+
+                if (newVersion) {
+                  await adminClient.schema("core").from("organizations")
+                    .update({ active_kb_version_id: newVersion.id })
+                    .eq("id", target_org_id);
+                }
               }
-
-              await fetch(`${SUPA_URL}/functions/v1/kb-ingest`, {
-                method: "POST",
-                headers: {
-                  "Authorization": `Bearer ${SUPA_SERVICE_KEY}`,
-                  "x-internal-secret": Deno.env.get("INTERNAL_API_SECRET") ?? "",
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                  organization_id: target_org_id,
-                  title: doc.title,
-                  format,
-                  content,
-                }),
-              });
             }
           }
 

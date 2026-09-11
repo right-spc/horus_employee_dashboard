@@ -614,41 +614,59 @@ Deno.serve(async (req: Request) => {
         return ok({ success: true }, cors);
       }
 
-      // ── List KB documents (read-only) ───────────────────────────────────
+      // ── List KB (read-only) ─────────────────────────────────────────────
+      // Whole-KB model: the org has one versioned knowledge base. Expose the
+      // active version as a single pseudo-document until the customer
+      // dashboard is rebuilt around versions.
       case "list_kb_docs": {
-        const { data, error } = await adminClient
-          .schema("kb").from("kb_documents")
-          .select("id, title, file_type, status, created_at")
-          .eq("organization_id", orgId)
-          .order("created_at", { ascending: false });
+        const { data: orgRow } = await adminClient
+          .schema("core").from("organizations")
+          .select("active_kb_version_id")
+          .eq("id", orgId)
+          .single();
 
-        if (error) throw error;
-        return ok(data || [], cors);
+        if (!orgRow?.active_kb_version_id) return ok([], cors);
+
+        const { data: version } = await adminClient
+          .schema("kb").from("kb_versions")
+          .select("id, version, created_at")
+          .eq("id", orgRow.active_kb_version_id)
+          .single();
+
+        if (!version) return ok([], cors);
+        return ok([{
+          id: version.id,
+          title: "Knowledge Base",
+          file_type: "markdown",
+          status: "ready",
+          created_at: version.created_at,
+          version: version.version,
+        }], cors);
       }
 
-      // ── Get KB chunks for a document ────────────────────────────────────
+      // ── Get KB content (sections of a KB version) ───────────────────────
       case "get_kb_chunks": {
         const { doc_id } = body;
         if (!doc_id) return err("Missing doc_id", 400, cors);
 
-        // Verify the doc belongs to this org
-        const { data: doc } = await adminClient
-          .schema("kb").from("kb_documents")
-          .select("id")
+        // Verify the version belongs to this org
+        const { data: version, error } = await adminClient
+          .schema("kb").from("kb_versions")
+          .select("id, sections")
           .eq("id", doc_id)
           .eq("organization_id", orgId)
           .single();
 
-        if (!doc) return err("Document not found", 404, cors);
+        if (error || !version) return err("KB version not found", 404, cors);
 
-        const { data: chunks, error } = await adminClient
-          .schema("kb").from("kb_chunks")
-          .select("id, chunk_code, content, heading")
-          .eq("document_id", doc_id)
-          .order("chunk_index", { ascending: true });
-
-        if (error) throw error;
-        return ok({ chunks: chunks || [] }, cors);
+        const sections = (version.sections as Array<{ title?: string; body?: string }>) || [];
+        const chunks = sections.map((s) => ({
+          id: version.id,
+          chunk_code: null,
+          heading: s.title || null,
+          content: s.title ? `## ${s.title}\n\n${s.body ?? ""}` : (s.body ?? ""),
+        }));
+        return ok({ chunks }, cors);
       }
 
       // ── Submit KB amend request ─────────────────────────────────────────

@@ -1,17 +1,17 @@
 // ============================================
 // EDGE FUNCTION: kb-ingest
-// Accepts a knowledge base document in plain
-// text/markdown or FAQ JSON format, chunks it,
-// and upserts it into kb_documents + kb_chunks.
-// Requires a valid JWT (dashboard use only —
-// not a public endpoint).
+// Accepts knowledge base content in plain
+// text/markdown or FAQ JSON format, parses it
+// into structured sections, and appends a new
+// IMMUTABLE KB version (kb.kb_versions), moving
+// the org's active_kb_version_id pointer.
+// Called by dashboard-api only (internal secret).
 //
 // POST /kb-ingest
 // Body (markdown):
 // {
 //   "organization_id": "uuid",
 //   "title": "Cancellation Policy",
-//   "description": "Optional summary",
 //   "format": "markdown",
 //   "content": "## Section\n\nContent here..."
 // }
@@ -20,53 +20,43 @@
 // {
 //   "organization_id": "uuid",
 //   "title": "Pricing FAQ",
-//   "description": "Optional summary",
 //   "format": "faq",
-//   "content": [
-//     { "question": "How much does X cost?", "answer": "X costs $50." },
-//     ...
-//   ]
+//   "content": [{ "question": "...", "answer": "..." }]
 // }
 //
-// To update an existing document, include its id:
-// {
-//   "id": "existing-doc-uuid",
-//   ...
-// }
-// All existing chunks for that document will be
-// replaced with the newly ingested ones.
+// Semantics:
+//   - no "id"  -> parsed sections are APPENDED to the current KB
+//   - "id" set -> parsed sections REPLACE the whole KB (edit flow)
+// Both create a new version; nothing is edited in place.
+//
+// Optional: "change_summary", "source", "created_by",
+// "created_by_name".
 // ============================================
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 // ── Types ─────────────────────────────────────
-interface MarkdownRequest {
-  organization_id: string;
+interface Section {
   title: string;
-  description?: string;
-  format: "markdown";
-  content: string;         // Raw markdown / plain text
-  id?: string;             // If provided, update existing document
+  body: string;
 }
 
-interface FaqRequest {
+interface IngestRequest {
   organization_id: string;
   title: string;
-  description?: string;
-  format: "faq";
-  content: Array<{
-    question: string;
-    answer: string;
-  }>;
-  id?: string;
+  format: "markdown" | "faq";
+  content: string | Array<{ question: string; answer: string }>;
+  id?: string;             // set = replace whole KB (edit flow); unset = append
+  change_summary?: string;
+  source?: string;         // dashboard | customer_amend | template
+  created_by?: string;
+  created_by_name?: string;
 }
-
-type IngestRequest = MarkdownRequest | FaqRequest;
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, apikey, x-internal-secret",
 };
 
 // ── Main Handler ─────────────────────────────
@@ -84,7 +74,7 @@ Deno.serve(async (req: Request) => {
   if (secret !== Deno.env.get("INTERNAL_API_SECRET")) {
     return errorResponse("Unauthorized", 401);
   }
-  
+
   const supabase = createClient(
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
@@ -106,10 +96,10 @@ Deno.serve(async (req: Request) => {
   }
   if (!body.content) return errorResponse("Missing content", 400);
 
-  // ── Verify org exists ─────────────────────
+  // ── Verify org exists, get active version pointer ──
   const { data: org, error: orgError } = await supabase
     .schema("core").from("organizations")
-    .select("id")
+    .select("id, active_kb_version_id")
     .eq("id", body.organization_id)
     .single();
 
@@ -117,206 +107,140 @@ Deno.serve(async (req: Request) => {
     return errorResponse(`Organization not found: ${body.organization_id}`, 404);
   }
 
-  // ── Chunk the content ─────────────────────
-  let chunks: string[];
+  // ── Parse content into sections ───────────
+  let parsed: Section[];
   try {
-    if (body.format === "markdown") {
-      chunks = chunkMarkdown(body.content);
-    } else {
-      chunks = chunkFaq(body.content as FaqRequest["content"]);
-    }
+    parsed = body.format === "markdown"
+      ? markdownToSections(body.content as string)
+      : faqToSections(body.content as Array<{ question: string; answer: string }>);
   } catch (e) {
     return errorResponse(`Failed to parse content: ${e.message}`, 400);
   }
 
-  if (chunks.length === 0) {
+  if (parsed.length === 0) {
     return errorResponse("No content could be extracted from the document", 400);
   }
 
-  // ── Upsert kb_document ────────────────────
-  const contentSize = typeof body.content === "string"
-    ? new TextEncoder().encode(body.content).length
-    : new TextEncoder().encode(JSON.stringify(body.content)).length;
-
-  let documentId: string;
-
-  if (body.id) {
-    // Update existing document
-    const { data: existing, error: fetchError } = await supabase
-      .schema("kb").from("kb_documents")
-      .select("id")
-      .eq("id", body.id)
-      .eq("organization_id", body.organization_id)
+  // ── Load current active sections (if any) ──
+  let currentSections: Section[] = [];
+  let currentMaxVersion = 0;
+  if (org.active_kb_version_id) {
+    const { data: activeVersion } = await supabase
+      .schema("kb").from("kb_versions")
+      .select("sections")
+      .eq("id", org.active_kb_version_id)
       .single();
-
-    if (fetchError || !existing) {
-      return errorResponse(`Document not found: ${body.id}`, 404);
-    }
-
-    const { error: updateError } = await supabase
-      .schema("kb").from("kb_documents")
-      .update({
-        title: body.title.trim(),
-        description: body.description?.trim() ?? null,
-        file_type: body.format === "markdown" ? "markdown" : "json",
-        file_size_bytes: contentSize,
-        status: "processing",
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", body.id);
-
-    if (updateError) {
-      return errorResponse(`Failed to update document: ${updateError.message}`, 500);
-    }
-
-    documentId = body.id;
-
-    // Delete all existing chunks — they will be replaced below
-    const { error: deleteError } = await supabase
-      .schema("kb").from("kb_chunks")
-      .delete()
-      .eq("document_id", documentId);
-
-    if (deleteError) {
-      return errorResponse(`Failed to clear existing chunks: ${deleteError.message}`, 500);
-    }
-  } else {
-    // Insert new document
-    const { data: newDoc, error: insertError } = await supabase
-      .schema("kb").from("kb_documents")
-      .insert({
-        organization_id: body.organization_id,
-        title: body.title.trim(),
-        description: body.description?.trim() ?? null,
-        file_type: body.format === "markdown" ? "markdown" : "json",
-        file_size_bytes: contentSize,
-        status: "processing",
-      })
-      .select("id")
-      .single();
-
-    if (insertError || !newDoc) {
-      return errorResponse(`Failed to create document: ${insertError?.message}`, 500);
-    }
-
-    documentId = newDoc.id;
+    currentSections = (activeVersion?.sections as Section[]) || [];
   }
 
-  // ── Insert chunks ─────────────────────────
-  const chunkRows = chunks.map((content, index) => ({
-    document_id: documentId,
-    organization_id: body.organization_id,
-    chunk_index: index,
-    content: content.trim(),
-    chunk_code: generateChunkCode(),
-    metadata: {
-      format: body.format,
-      document_title: body.title.trim(),
-      chunk_count: chunks.length,
-    },
-  }));
+  const { data: maxRow } = await supabase
+    .schema("kb").from("kb_versions")
+    .select("version")
+    .eq("organization_id", body.organization_id)
+    .order("version", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  currentMaxVersion = maxRow?.version ?? 0;
 
-  const { error: chunksError } = await supabase
-    .schema("kb").from("kb_chunks")
-    .insert(chunkRows);
+  // ── Compose the new version's sections ────
+  const replacing = !!body.id;
+  const newSections = replacing ? parsed : [...currentSections, ...parsed];
+  const changeSummary = body.change_summary?.trim()
+    || (replacing ? `Updated knowledge base` : `Added "${body.title.trim()}"`);
 
-  if (chunksError) {
-    // Mark document as errored
-    await supabase
-      .schema("kb").from("kb_documents")
-      .update({ status: "error", error_message: chunksError.message })
-      .eq("id", documentId);
-    return errorResponse(`Failed to insert chunks: ${chunksError.message}`, 500);
+  // ── Insert new immutable version ──────────
+  const { data: newVersion, error: insertError } = await supabase
+    .schema("kb").from("kb_versions")
+    .insert({
+      organization_id: body.organization_id,
+      version: currentMaxVersion + 1,
+      sections: newSections,
+      change_summary: changeSummary,
+      source: body.source || "dashboard",
+      created_by: body.created_by || null,
+      created_by_name: body.created_by_name || null,
+    })
+    .select("id, version")
+    .single();
+
+  if (insertError || !newVersion) {
+    return errorResponse(`Failed to create KB version: ${insertError?.message}`, 500);
   }
 
-  // ── Mark document as ready ────────────────
-  await supabase
-    .schema("kb").from("kb_documents")
-    .update({ status: "ready" })
-    .eq("id", documentId);
+  // ── Move the pointer ──────────────────────
+  const { error: pointerError } = await supabase
+    .schema("core").from("organizations")
+    .update({ active_kb_version_id: newVersion.id })
+    .eq("id", body.organization_id);
+
+  if (pointerError) {
+    return errorResponse(`Version created but failed to activate: ${pointerError.message}`, 500);
+  }
 
   return new Response(
     JSON.stringify({
       success: true,
-      document_id: documentId,
-      chunks_created: chunks.length,
-      action: body.id ? "updated" : "created",
+      version_id: newVersion.id,
+      version: newVersion.version,
+      sections_count: newSections.length,
+      // legacy alias for the current dashboard toast
+      chunks_created: parsed.length,
+      action: replacing ? "updated" : "created",
     }),
     { status: 200, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
   );
 });
 
-// ── Markdown chunker ──────────────────────────────────────────────────────────
-// Splits markdown on ## headings. Each heading + its following content = 1 chunk.
-// Content before the first heading is treated as an introduction chunk.
-// Single # headings (document title) are stripped rather than used as chunk boundaries.
-function chunkMarkdown(content: string): string[] {
-  const chunks: string[] = [];
-
-  // Normalise line endings
+// ── Markdown → sections ───────────────────────────────────────────────────────
+// Splits on ## headings: each heading + its content = one titled section.
+// Content before the first heading = one untitled intro section.
+// Lone # titles (document title) are stripped as metadata.
+function markdownToSections(content: string): Section[] {
   const normalised = content.replace(/\r\n/g, "\n").trim();
-
-  // Strip lone H1 title at the top if present — it's document metadata, not a chunk
   const withoutTitle = normalised.replace(/^#\s+[^\n]+\n?/, "").trim();
 
-  // Split on ## headings
-  const sections = withoutTitle.split(/\n(?=##\s)/);
+  const rawSections = withoutTitle.split(/\n(?=##\s)/);
+  const sections: Section[] = [];
 
-  for (const section of sections) {
-    const trimmed = section.trim();
+  for (const raw of rawSections) {
+    const trimmed = raw.trim();
     if (!trimmed) continue;
 
-    // Skip sections that are only a heading with no content
-    const lines = trimmed.split("\n");
-    const hasContent = lines.some((line, i) => i > 0 && line.trim().length > 0);
-    if (lines.length === 1 && !hasContent) continue;
-    if (!hasContent && lines[0].startsWith("##")) continue;
-
-    chunks.push(trimmed);
+    if (/^##\s/.test(trimmed)) {
+      const nl = trimmed.indexOf("\n");
+      const title = (nl === -1 ? trimmed : trimmed.slice(0, nl)).replace(/^##\s+/, "").trim();
+      const bodyText = nl === -1 ? "" : trimmed.slice(nl + 1).trim();
+      if (!title && !bodyText) continue;
+      if (!bodyText) continue; // heading-only sections carry no knowledge
+      sections.push({ title, body: bodyText });
+    } else {
+      sections.push({ title: "", body: trimmed });
+    }
   }
 
-  // If no ## headings found, fall back to paragraph-based chunking
-  if (chunks.length === 0) {
-    return chunkByParagraph(withoutTitle);
+  // Fallback: no ## headings at all → paragraph-based untitled sections
+  if (sections.length === 0) {
+    return withoutTitle
+      .split(/\n{2,}/)
+      .map((p) => ({ title: "", body: p.trim() }))
+      .filter((s) => s.body.length > 20);
   }
 
-  return chunks;
+  return sections;
 }
 
-// Fallback: split on blank lines when no headings are present
-function chunkByParagraph(content: string): string[] {
-  return content
-    .split(/\n{2,}/)
-    .map((p) => p.trim())
-    .filter((p) => p.length > 20); // Skip very short fragments
-}
-
-// ── FAQ chunker ───────────────────────────────────────────────────────────────
-// Each Q&A pair becomes one chunk formatted as:
-//   Q: <question>
-//   A: <answer>
-function chunkFaq(
+// ── FAQ JSON → sections ───────────────────────────────────────────────────────
+// Each Q&A pair becomes one section: title = question, body = answer.
+function faqToSections(
   pairs: Array<{ question: string; answer: string }>
-): string[] {
+): Section[] {
   if (!Array.isArray(pairs)) {
     throw new Error("FAQ content must be an array of { question, answer } objects");
   }
 
   return pairs
     .filter((pair) => pair.question?.trim() && pair.answer?.trim())
-    .map((pair) => `Q: ${pair.question.trim()}\nA: ${pair.answer.trim()}`);
-}
-
-// ── Chunk code generator ─────────────────────────────────────────────────────
-// Produces a random 6-char alphanumeric code for each KB chunk.
-// Used by Haiku at query time to identify which chunks to return.
-function generateChunkCode(): string {
-  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
-  let code = "";
-  for (let i = 0; i < 6; i++) {
-    code += chars[Math.floor(Math.random() * chars.length)];
-  }
-  return code;
+    .map((pair) => ({ title: pair.question.trim(), body: pair.answer.trim() }));
 }
 
 // ── Helper ────────────────────────────────────────────────────────────────────

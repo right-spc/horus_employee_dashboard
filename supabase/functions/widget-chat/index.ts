@@ -923,7 +923,11 @@ async function handleTestChat(
   body: Record<string, unknown>,
 ): Promise<Response> {
   const auth = req.headers.get("authorization") || "";
-  if (auth !== `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`) {
+  // Shared internal secret (function envs can hold a different-but-valid
+  // service key than the project's current one — exact-match on
+  // SUPABASE_SERVICE_ROLE_KEY is not reliable across functions).
+  const expected = Deno.env.get("INTERNAL_FUNCTION_SECRET") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (auth !== `Bearer ${expected}`) {
     return errorResponse("Unauthorized", 401, "*");
   }
 

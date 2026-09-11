@@ -25,6 +25,10 @@
   const SUPA_URL = Deno.env.get("APP_SUPABASE_URL") ?? Deno.env.get("SUPABASE_URL")!;
   const SUPA_ANON_KEY = Deno.env.get("APP_ANON_KEY") ?? Deno.env.get("SUPABASE_ANON_KEY")!;
   const SUPA_SERVICE_KEY = Deno.env.get("APP_SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  // Shared secret for server-to-server calls between our edge functions
+  // (function envs can hold a different-but-valid service key than the
+  // project's current one, so exact service-key matching is unreliable).
+  const INTERNAL_SECRET = Deno.env.get("INTERNAL_FUNCTION_SECRET");
 
   // Preset categories the salesperson role is allowed to charge for.
   // Salespeople can ONLY send setup-fee and yearly links — no monthly, no addon, no custom.
@@ -407,7 +411,7 @@
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              Authorization: `Bearer ${SUPA_SERVICE_KEY}`,
+              Authorization: `Bearer ${INTERNAL_SECRET ?? SUPA_SERVICE_KEY}`,
             },
             body: JSON.stringify({
               test_mode: true,
@@ -962,7 +966,7 @@
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
-                Authorization: `Bearer ${SUPA_SERVICE_KEY}`,
+                Authorization: `Bearer ${INTERNAL_SECRET ?? SUPA_SERVICE_KEY}`,
               },
               body: JSON.stringify({ org_id, start_date, end_date, recipient_email }),
             }

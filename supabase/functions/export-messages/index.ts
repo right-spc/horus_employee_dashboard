@@ -37,10 +37,11 @@ Deno.serve(async (req: Request) => {
     return json({ error: "Method not allowed" }, 405);
   }
 
-  // ── Auth: only the service role key may invoke this function ──────────────
+  // ── Auth: internal callers only (service role key or shared internal secret) ─
   const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+  const internalSecret = Deno.env.get("INTERNAL_FUNCTION_SECRET");
   const authHeader = req.headers.get("Authorization") ?? "";
-  if (authHeader !== `Bearer ${serviceKey}`) {
+  if (authHeader !== `Bearer ${serviceKey}` && (!internalSecret || authHeader !== `Bearer ${internalSecret}`)) {
     return json({ error: "Unauthorized" }, 401);
   }
 

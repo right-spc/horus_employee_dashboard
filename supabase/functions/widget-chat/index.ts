@@ -1009,6 +1009,7 @@ async function handleTestChat(
     { role: "user", content: message },
   ];
 
+  const kimiT0 = Date.now();
   const kimiResponse = await callKimiWithRetry({
     model: KIMI_MODEL,
     max_tokens: 2000,
@@ -1017,6 +1018,7 @@ async function handleTestChat(
     tools: [SUBMIT_RESPONSE_TOOL],
     tool_choice: "required",
   });
+  const kimiElapsedMs = Date.now() - kimiT0;
 
   const rawText = (kimiResponse.choices?.[0]?.message?.content as string) ?? "";
   const toolCalls = (kimiResponse.choices?.[0]?.message?.tool_calls ?? []) as Array<Record<string, unknown>>;
@@ -1046,6 +1048,13 @@ async function handleTestChat(
     escalation_type: parsed.escalation_type,
     lead_priority: parsed.lead_priority,
     sessionId: "test",
+    // Diagnostics (test mode only) — latency + prompt-cache visibility
+    debug: {
+      kimi_ms: kimiElapsedMs,
+      prompt_tokens: kimiResponse.usage?.prompt_tokens ?? null,
+      cached_tokens: kimiResponse.usage?.prompt_tokens_details?.cached_tokens ?? null,
+      completion_tokens: kimiResponse.usage?.completion_tokens ?? null,
+    },
   }, 200, "*");
 }
 

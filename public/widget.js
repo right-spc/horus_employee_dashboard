@@ -1178,6 +1178,32 @@
         box-shadow: 0 4px 14px rgba(0,0,0,0.18);
       }
 
+      /* Robot fallback when no logo is set (or the image fails to load) */
+      .horus-gate-logo-fallback {
+        width: 72px;
+        height: 72px;
+        border-radius: 50%;
+        background: var(--horus-header-bg);
+        color: var(--horus-header-text);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-shadow: 0 4px 14px rgba(0,0,0,0.18);
+      }
+
+      .horus-gate-logo-fallback svg {
+        width: 36px;
+        height: 36px;
+      }
+
+      .horus-img-fallback {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        height: 100%;
+      }
+
       .horus-gate .horus-form-submit {
         margin-top: auto;
       }
@@ -1925,6 +1951,7 @@
         </div>
       `;
       this.chatWindow.appendChild(header);
+      this.bindImgFallback(header);
 
       // Messages area
       this.messagesArea = document.createElement('div');
@@ -2107,7 +2134,7 @@
 
       let formHTML = `
         <div class="horus-gate">
-          ${this.config.logoUrl ? `<div class="horus-gate-logo"><img src="${escapeHTML(this.config.logoUrl)}" alt="" /></div>` : ''}
+          <div class="horus-gate-logo">${this.config.logoUrl ? `<img class="horus-avatar-img" src="${escapeHTML(this.config.logoUrl)}" alt="" />` : `<span class="horus-gate-logo-fallback">${ICONS.robot}</span>`}</div>
           <div class="horus-form-title">${escapeHTML(this.config.formTitle || "Let's connect!")}</div>
           <div class="horus-form-subtitle">${escapeHTML(this.config.formSubtitle || "We'll respond immediately")}</div>
       `;
@@ -2157,6 +2184,7 @@
       // novalidate: handleFormSubmit runs the custom validation.
       formOverlay.innerHTML = `<form class="horus-form" novalidate>${formHTML}</form>`;
       this.chatWindow.appendChild(formOverlay);
+      this.bindImgFallback(formOverlay);
 
       // Disclaimer checkbox gates the Start button
       const check = formOverlay.querySelector('#horus-disclaimer-check');
@@ -2240,16 +2268,15 @@
       // Remove form
       formOverlay.remove();
 
-      // Show welcome message
-      this.showWelcomeMessage();
-
       // Focus input
       const input = this.shadowRoot.querySelector('.horus-input');
       if (input) {
         input.focus();
       }
 
-      // Trigger initial API call
+      // Trigger initial API call — the server returns the welcome message,
+      // which sendToAPI renders. (No local showWelcomeMessage here — that
+      // rendered it twice.)
       this.sendToAPI('[CONVERSATION_STARTED]');
     }
 
@@ -2533,6 +2560,25 @@
     }
 
     /**
+     * Swap any broken logo images in a container back to the robot icon
+     * (stale cached config pointing at a deleted logo, blocked CDN, etc.)
+     */
+    bindImgFallback(container) {
+      container.querySelectorAll('img.horus-avatar-img').forEach((img) => {
+        const swap = () => {
+          if (!img.isConnected) return;
+          const span = document.createElement('span');
+          span.className = img.closest('.horus-gate-logo') ? 'horus-gate-logo-fallback' : 'horus-img-fallback';
+          span.innerHTML = ICONS.robot;
+          img.replaceWith(span);
+        };
+        img.addEventListener('error', swap, { once: true });
+        // Already failed before the listener was attached
+        if (img.complete && img.naturalWidth === 0) swap();
+      });
+    }
+
+    /**
      * AI avatar content: org logo when set, robot icon otherwise
      */
     aiAvatar() {
@@ -2577,6 +2623,7 @@
       `;
 
       this.messagesArea.appendChild(messageEl);
+      this.bindImgFallback(messageEl);
 
       // Render quick replies if present
       if (isAI && message.quickReplies && message.quickReplies.length > 0) {
@@ -2637,6 +2684,7 @@
         `;
         this.messagesArea.appendChild(el);
         this.streamMessageEl = el;
+        this.bindImgFallback(el);
       }
       this.streamText += text;
       const contentEl = this.streamMessageEl.querySelector('.horus-message-content');
@@ -2659,6 +2707,7 @@
         </div>
       `;
       this.messagesArea.appendChild(this.typingIndicator);
+      this.bindImgFallback(this.typingIndicator);
       this.scrollToBottom();
     }
 

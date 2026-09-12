@@ -1664,6 +1664,65 @@ async function sendTestChat() {
   renderTestChatMessages();
 }
 
+// ── Org logo upload ─────────────────────────────────────────────────────────
+// File is decoded in the browser, center-cropped to a square 256px PNG, then
+// sent as a data URL — anything the browser can decode (png/jpg/webp/gif/svg)
+// gets normalized; undecodable files (e.g. iPhone HEIC) get a friendly error.
+
+function downscaleToPng(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const size = 256;
+      const canvas = document.createElement("canvas");
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext("2d");
+      const scale = Math.max(size / img.width, size / img.height);
+      const w = img.width * scale, h = img.height * scale;
+      ctx.drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
+      URL.revokeObjectURL(url);
+      resolve(canvas.toDataURL("image/png"));
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("decode failed"));
+    };
+    img.src = url;
+  });
+}
+
+async function uploadOrgLogo(input) {
+  const file = input.files?.[0];
+  if (!file) return;
+  if (file.size > 10 * 1024 * 1024) {
+    toast("Image too large (max 10MB)", "error");
+    input.value = "";
+    return;
+  }
+  try {
+    const dataUrl = await downscaleToPng(file);
+    const { logo_url } = await api("upload_org_logo", { org_id: currentOrgId, image: dataUrl });
+    window._orgData.org.logo_url = logo_url;
+    renderSettingsTab(document.getElementById("tab-content"), window._orgData.org);
+    toast("Logo uploaded", "success");
+  } catch (e) {
+    toast(e.message?.includes("decode") ? "Couldn't read that image — please use PNG or JPG" : e.message, "error");
+  } finally {
+    input.value = "";
+  }
+}
+
+async function removeOrgLogo() {
+  try {
+    await api("remove_org_logo", { org_id: currentOrgId });
+    window._orgData.org.logo_url = null;
+    renderSettingsTab(document.getElementById("tab-content"), window._orgData.org);
+    toast("Logo removed", "success");
+  } catch (e) { toast(e.message, "error"); }
+}
+
 async function toggleWidget(enabled) {
   try {
     await api("update_widget", {
@@ -2381,6 +2440,25 @@ function renderSettingsTab(el, org) {
   }
 
   el.innerHTML = `
+    <div class="card mb-4">
+      <div class="card-header"><div class="card-title">Organization Logo</div></div>
+      <div class="card-body">
+        <div class="logo-row">
+          <div class="logo-preview">
+            ${org.logo_url
+              ? `<img src="${escHtml(org.logo_url)}" alt="Logo" />`
+              : `<span>${escHtml((org.name || "?").charAt(0).toUpperCase())}</span>`}
+          </div>
+          <div>
+            <div class="hint mb-2">Shown in the chat widget header and as the AI's avatar. A square image works best — any common format, automatically resized to 256px.</div>
+            <input type="file" id="s-logo-file" accept="image/*" style="display:none" onchange="uploadOrgLogo(this)">
+            <button class="btn btn-primary" onclick="document.getElementById('s-logo-file').click()">Upload Logo</button>
+            ${org.logo_url ? `<button class="btn btn-secondary" style="margin-left:8px" onclick="removeOrgLogo()">Remove</button>` : ""}
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="card mb-4">
       <div class="card-header"><div class="card-title">Organization Settings</div></div>
       <div class="card-body">

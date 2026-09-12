@@ -77,6 +77,13 @@ Deno.serve(async (req: Request) => {
     const origin = req.headers.get("origin") ?? "*";
     const allowedOrigin = getAllowedOrigin(origin, config.allowed_domains);
 
+    // Org logo (branding for the widget header + AI avatar)
+    const { data: orgRow } = await supabase
+      .schema("core").from("organizations")
+      .select("logo_url")
+      .eq("id", config.organization_id)
+      .single();
+
     // If widget is disabled, return minimal response
     if (!config.enabled) {
       return jsonResponse({
@@ -101,6 +108,7 @@ Deno.serve(async (req: Request) => {
       autoOpen: config.auto_open,
       autoOpenDelay: config.auto_open_delay_ms,
       showPoweredBy: config.show_powered_by,
+      logoUrl: orgRow?.logo_url ?? null,
 
       // Pre-chat form
       captureFields: config.capture_fields ?? [],

@@ -438,6 +438,49 @@
           return ok(payload);
         }
 
+        // ── Org logo upload/remove ──────────────────────────────────────────
+        // Logo lives in the public org-assets bucket at logos/{org_id}.png;
+        // its URL (with a cache-busting version param) sits on the org row.
+        // The dashboard downscales to 256px PNG before calling this.
+        case "upload_org_logo": {
+          const { org_id, image } = body as { org_id: string; image: string };
+          if (!org_id || !image) return err("Missing org_id or image", 400);
+          await assertOrgAccess(adminClient, dashUser, org_id);
+
+          const m = /^data:(image\/(?:png|jpeg|webp));base64,(.+)$/.exec(image);
+          if (!m) return err("Image must be a PNG, JPEG or WebP data URL", 400);
+          const bytes = Uint8Array.from(atob(m[2]), (c) => c.charCodeAt(0));
+          if (bytes.length > 5 * 1024 * 1024) return err("Image too large (max 5MB)", 400);
+
+          const path = `logos/${org_id}.png`;
+          const { error: upErr } = await adminClient.storage
+            .from("org-assets")
+            .upload(path, bytes, { contentType: "image/png", upsert: true, cacheControl: "3600" });
+          if (upErr) throw upErr;
+
+          const { data: pub } = adminClient.storage.from("org-assets").getPublicUrl(path);
+          const logoUrl = `${pub.publicUrl}?v=${Date.now()}`;
+          const { error: updErr } = await adminClient
+            .schema("core").from("organizations")
+            .update({ logo_url: logoUrl })
+            .eq("id", org_id);
+          if (updErr) throw updErr;
+          return ok({ logo_url: logoUrl });
+        }
+
+        case "remove_org_logo": {
+          const { org_id } = body as { org_id: string };
+          if (!org_id) return err("Missing org_id", 400);
+          await assertOrgAccess(adminClient, dashUser, org_id);
+          await adminClient.storage.from("org-assets").remove([`logos/${org_id}.png`]);
+          const { error: updErr } = await adminClient
+            .schema("core").from("organizations")
+            .update({ logo_url: null })
+            .eq("id", org_id);
+          if (updErr) throw updErr;
+          return ok({ success: true });
+        }
+
         // ── Create org ──────────────────────────────────────────────────────
         case "create_org": {
           const { name, slug, ai_tone, message_limit_per_month, auto_send_min_confidence, subscription_tier, subscription_plan } = body;

@@ -838,6 +838,23 @@
         height: 18px;
       }
 
+      /* Org logo (header + AI avatar) — fills its circular container */
+      .horus-avatar-img {
+        width: 100%;
+        height: 100%;
+        border-radius: 50%;
+        object-fit: cover;
+        display: block;
+      }
+
+      .horus-logo-wrap {
+        width: 28px;
+        height: 28px;
+        border-radius: 50%;
+        overflow: hidden;
+        flex-shrink: 0;
+      }
+
       .horus-message-content {
         padding: 12px 16px;
         border-radius: 16px;
@@ -1770,7 +1787,7 @@
       header.className = 'horus-header';
       header.innerHTML = `
         <div class="horus-header-title">
-          ${ICONS.robot}
+          ${this.config.logoUrl ? `<span class="horus-logo-wrap"><img class="horus-avatar-img" src="${escapeHTML(this.config.logoUrl)}" alt="" /></span>` : ICONS.robot}
           <span>${escapeHTML(this.config.headerTitle || 'Chat with us')}</span>
         </div>
         <div class="horus-header-actions">
@@ -2343,6 +2360,15 @@
     }
 
     /**
+     * AI avatar content: org logo when set, robot icon otherwise
+     */
+    aiAvatar() {
+      return this.config?.logoUrl
+        ? `<img class="horus-avatar-img" src="${escapeHTML(this.config.logoUrl)}" alt="" />`
+        : ICONS.robot;
+    }
+
+    /**
      * Add message to chat
      */
     addMessage(message) {
@@ -2365,7 +2391,7 @@
       messageEl.className = `horus-message ${message.role}`;
 
       const isAI = message.role === 'ai';
-      const avatar = isAI ? ICONS.robot : '';
+      const avatar = isAI ? this.aiAvatar() : '';
       const sanitizedContent = isAI ? formatAIMessage(message.content) : escapeHTML(message.content);
       const time = formatTime(message.timestamp || new Date());
 
@@ -2430,7 +2456,7 @@
         const el = document.createElement('div');
         el.className = 'horus-message ai';
         el.innerHTML = `
-          <div class="horus-message-avatar">${ICONS.robot}</div>
+          <div class="horus-message-avatar">${this.aiAvatar()}</div>
           <div>
             <div class="horus-message-content"></div>
             <div class="horus-message-time">${formatTime(new Date())}</div>
@@ -2452,7 +2478,7 @@
       this.typingIndicator = document.createElement('div');
       this.typingIndicator.className = 'horus-typing';
       this.typingIndicator.innerHTML = `
-        <div class="horus-message-avatar">${ICONS.robot}</div>
+        <div class="horus-message-avatar">${this.aiAvatar()}</div>
         <div class="horus-typing-indicator">
           <span class="horus-typing-dot"></span>
           <span class="horus-typing-dot"></span>

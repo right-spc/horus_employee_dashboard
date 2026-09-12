@@ -1016,6 +1016,11 @@
         overflow-y: auto;
       }
 
+      .horus-form {
+        /* Semantic wrapper only — keeps the overlay's flex layout intact */
+        display: contents;
+      }
+
       .horus-form-title {
         font-size: 20px;
         font-weight: 600;
@@ -1984,7 +1989,10 @@
         </button>
       `;
 
-      formOverlay.innerHTML = formHTML;
+      // Wrapped in a real <form> so the submit button and Enter key fire a
+      // submit event (previously the listener sat on a div — dead button).
+      // novalidate: handleFormSubmit runs the custom validation.
+      formOverlay.innerHTML = `<form class="horus-form" novalidate>${formHTML}</form>`;
       this.chatWindow.appendChild(formOverlay);
 
       // Form submission

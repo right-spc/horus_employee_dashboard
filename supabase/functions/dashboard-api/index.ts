@@ -625,6 +625,111 @@
           return ok({ success: true });
         }
 
+        // ── Business details (profile + hours) ──────────────────────────────
+        // These tables feed the AI's system prompt in widget-chat. Edited from
+        // the KB tab → Business Details panel.
+        case "get_business_details": {
+          const { org_id } = body as { org_id: string };
+          if (!org_id) return err("Missing org_id", 400);
+          await assertOrgAccess(adminClient, dashUser, org_id);
+
+          const [{ data: profile }, { data: hours, error: hErr }] = await Promise.all([
+            adminClient.schema("core").from("business_profiles")
+              .select("*")
+              .eq("organization_id", org_id)
+              .maybeSingle(),
+            adminClient.schema("core").from("business_hours")
+              .select("day_of_week, is_open, open_time, close_time, note")
+              .eq("organization_id", org_id)
+              .order("day_of_week"),
+          ]);
+          if (hErr) throw hErr;
+          return ok({ profile: profile || null, hours: hours || [] });
+        }
+
+        case "update_business_profile": {
+          const { org_id, updates } = body as { org_id: string; updates: Record<string, unknown> };
+          if (!org_id || !updates) return err("Missing org_id or updates", 400);
+          await assertOrgAccess(adminClient, dashUser, org_id);
+          await assertNotDemoForStaff(adminClient, dashUser, org_id);
+
+          const allowed = [
+            "business_name", "tagline", "description",
+            "address", "city", "state", "postal_code", "country",
+            "phone", "website_url", "email_signature",
+            "booking_url", "booking_instructions",
+            "cancellation_policy", "deposit_policy", "other_policies",
+          ];
+          const row: Record<string, unknown> = { organization_id: org_id, updated_at: new Date().toISOString() };
+          for (const key of allowed) {
+            if (typeof updates[key] !== "undefined") {
+              const v = updates[key];
+              row[key] = typeof v === "string" ? (v.trim() || null) : v;
+            }
+          }
+
+          // business_name is NOT NULL with no default (checked even when the
+          // upsert turns into an UPDATE) — fall back to the org name.
+          if (!row.business_name) {
+            const { data: orgRow } = await adminClient
+              .schema("core").from("organizations")
+              .select("name")
+              .eq("id", org_id)
+              .single();
+            row.business_name = orgRow?.name || "Unnamed Business";
+          }
+          // country is NOT NULL DEFAULT 'US' — omit when cleared so the
+          // default applies on insert and the existing value survives updates.
+          if (row.country === null) delete row.country;
+
+          const { error } = await adminClient.schema("core").from("business_profiles")
+            .upsert(row, { onConflict: "organization_id" });
+          if (error) throw error;
+          return ok({ success: true });
+        }
+
+        case "update_business_hours": {
+          const { org_id, hours } = body as {
+            org_id: string;
+            hours: { day_of_week: number; is_open: boolean; open_time?: string | null; close_time?: string | null; note?: string | null }[];
+          };
+          if (!org_id || !Array.isArray(hours)) return err("Missing org_id or hours", 400);
+          await assertOrgAccess(adminClient, dashUser, org_id);
+          await assertNotDemoForStaff(adminClient, dashUser, org_id);
+
+          const timeRe = /^\d{2}:\d{2}(:\d{2})?$/;
+          for (const h of hours) {
+            if (!Number.isInteger(h.day_of_week) || h.day_of_week < 0 || h.day_of_week > 6) {
+              return err("day_of_week must be an integer 0-6", 400);
+            }
+            if (h.is_open) {
+              if (!h.open_time || !timeRe.test(h.open_time) || !h.close_time || !timeRe.test(h.close_time)) {
+                return err("Open days require open_time and close_time (HH:MM)", 400);
+              }
+            }
+            if (h.note && h.note.length > 200) return err("Note too long (max 200 chars)", 400);
+          }
+
+          const { error: delErr } = await adminClient.schema("core").from("business_hours")
+            .delete()
+            .eq("organization_id", org_id);
+          if (delErr) throw delErr;
+
+          if (hours.length > 0) {
+            const rows = hours.map(h => ({
+              organization_id: org_id,
+              day_of_week: h.day_of_week,
+              is_open: !!h.is_open,
+              open_time: h.is_open ? h.open_time : null,
+              close_time: h.is_open ? h.close_time : null,
+              note: h.note?.trim() || null,
+            }));
+            const { error: insErr } = await adminClient.schema("core").from("business_hours").insert(rows);
+            if (insErr) throw insErr;
+          }
+          return ok({ success: true });
+        }
+
         // ── Get auth link ───────────────────────────────────────────────────
         case "get_auth_link": {
           const { org_id, provider } = body;
@@ -2169,6 +2274,24 @@
 
     if (error || !data) {
       throw new Error("Access denied — organization not found or outside your access window");
+    }
+  }
+
+  // Demo orgs are fictional businesses — only owners may edit their business
+  // profile/hours (salespeople get read access via assertOrgAccess).
+  async function assertNotDemoForStaff(
+    adminClient: ReturnType<typeof createClient>,
+    dashUser: DashboardUser,
+    orgId: string
+  ): Promise<void> {
+    if (dashUser.role === "owner") return;
+    const { data: orgCheck } = await adminClient
+      .schema("core").from("organizations")
+      .select("is_demo")
+      .eq("id", orgId)
+      .single();
+    if (orgCheck?.is_demo) {
+      throw new Error("Demo business details can only be edited by owners");
     }
   }
 

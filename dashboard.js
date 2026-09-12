@@ -1797,13 +1797,19 @@ async function saveWidgetConfig() {
   } catch (e) { toast(e.message, "error"); }
 }
 
-// ── KB Tab (versioned sections editor) ────────────────────────────────────────
-// One knowledge base per org: an append-only chain of versions, each a list of
-// structured sections ({title, body}). Edits are local until "Save as New
-// Version" — nothing is edited in place; rollback creates a NEW version copying
-// the old one. See docs/client-rbac-plan.md §5.
+// ── KB Tab ────────────────────────────────────────────────────────────────────
+// Everything that shapes what the AI knows and how it behaves, organized in
+// sub-pills (mirrors the customer dashboard's AI Settings):
+//   Personality      — AI tone, system prompt, routing rules (owner-only)
+//   Business Details — business profile + working hours (feeds the AI prompt)
+//   Knowledge Base   — versioned sections editor (append-only chain; edits are
+//                      local until "Save as New Version", rollback = new version)
+//   Change Requests  — customer-submitted KB amend requests for review
+// See docs/client-rbac-plan.md §5 for the versioning model.
 
-let _kb = null; // { orgId, sections: [{title, body, _editing?, _collapsed?}], dirty, activeVersionNum }
+let currentKbSection = "personality";
+let _kb = null; // { orgId, sections, dirty, activeVersionNum, versions, requests, biz?, bizOrgId? }
+let _kbHoursMode = "custom"; // custom | 24_7 | none — selected mode in Business Details
 
 async function renderKbTab(el, kbDocs, org) {
   el.innerHTML = `<div class="card"><div class="loading-overlay"><div class="spinner"></div> Loading...</div></div>`;
@@ -1824,35 +1830,408 @@ async function renderKbTab(el, kbDocs, org) {
       sections,
       dirty: false,
       activeVersionNum: (versions.find(v => v.id === org.active_kb_version_id) || {}).version || null,
+      versions: versions || [],
+      requests: requests || [],
+      biz: null,
+      bizOrgId: null,
     };
 
+    if (currentIsDemo && currentKbSection === "business") currentKbSection = "personality";
+    const pendingCount = _kb.requests.filter(r => r.status === "pending").length;
+
     el.innerHTML = `
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">Knowledge Base ${_kb.activeVersionNum ? `<span class="badge badge-blue" style="margin-left:6px">v${_kb.activeVersionNum}</span>` : ""}</div>
-          <div class="flex-row">
-            ${!currentIsDemo ? `<button class="btn btn-secondary btn-sm" onclick="showUseTemplateModal('kb')">Use Template</button>` : ""}
-            <button class="btn btn-primary btn-sm" onclick="kbAddSection()">${ICONS.plus} Add Section</button>
-          </div>
-        </div>
-        <div id="kb-sections"></div>
-        <div class="card-body" id="kb-save-bar" style="display:none;border-top:1px solid var(--border)">
-          <div class="form-group" style="margin-bottom:8px">
-            <label>Change summary <span class="hint">(required — becomes the version's history entry)</span></label>
-            <input type="text" id="kb-change-summary" placeholder="e.g. Updated refund policy" />
-          </div>
-          <div class="flex-row">
-            <button class="btn btn-primary" id="kb-save-btn" onclick="kbSaveVersion()">Save as New Version</button>
-            <button class="btn btn-secondary" onclick="renderKbTab(document.getElementById('tab-content'), null, window._orgData.org)">Discard Changes</button>
-          </div>
-        </div>
+      <div class="tabs" id="kb-pills" style="margin-bottom:16px">
+        <button class="tab ${currentKbSection === "personality" ? "active" : ""}" onclick="switchKbSection('personality')">Personality</button>
+        ${!currentIsDemo ? `<button class="tab ${currentKbSection === "business" ? "active" : ""}" onclick="switchKbSection('business')">Business Details</button>` : ""}
+        <button class="tab ${currentKbSection === "knowledge" ? "active" : ""}" onclick="switchKbSection('knowledge')">Knowledge Base</button>
+        <button class="tab ${currentKbSection === "changes" ? "active" : ""}" onclick="switchKbSection('changes')">Change Requests${pendingCount ? ` <span class="badge badge-blue" style="margin-left:4px">${pendingCount}</span>` : ""}</button>
       </div>
-      ${kbAmendRequestsHtml(requests || [])}
-      ${kbVersionHistoryHtml(versions || [])}`;
-    kbRenderSections();
+      <div id="kb-panel"></div>`;
+    renderKbPanel(org);
   } catch (e) {
     el.innerHTML = `<div class="card"><div class="card-body"><div class="alert alert-danger">${escHtml(e.message)}</div></div></div>`;
   }
+}
+
+function switchKbSection(section) {
+  currentKbSection = section;
+  document.querySelectorAll("#kb-pills .tab").forEach(t => {
+    t.classList.toggle("active", (t.getAttribute("onclick") || "").includes(`'${section}'`));
+  });
+  renderKbPanel(window._orgData.org);
+}
+
+function renderKbPanel(org) {
+  const panel = document.getElementById("kb-panel");
+  if (!panel || !_kb) return;
+  if (currentKbSection === "business" && !currentIsDemo) renderKbBusiness(panel, org);
+  else if (currentKbSection === "changes") panel.innerHTML = kbChangesHtml();
+  else if (currentKbSection === "knowledge") { panel.innerHTML = kbKnowledgeHtml(); kbRenderSections(); }
+  else renderKbPersonality(panel, org);
+}
+
+// ── Personality (tone + system prompt + routing rules) ───────────────────────
+
+function renderKbPersonality(panel, org) {
+  panel.innerHTML = `
+    <div class="card mb-4">
+      <div class="card-header"><div class="card-title">AI Tone</div></div>
+      <div class="card-body">
+        <div class="form-group">
+          <label>Response Tone</label>
+          <select id="s-tone" style="max-width:280px">
+            ${["professional","friendly","formal","casual"].map(t =>
+              `<option value="${t}" ${org.ai_tone===t?"selected":""}>${t.charAt(0).toUpperCase()+t.slice(1)}</option>`
+            ).join("")}
+          </select>
+          <div class="form-hint">The overall style of the AI's replies across all channels.</div>
+        </div>
+        <button class="btn btn-primary" onclick="saveAiTone()">Save Tone</button>
+      </div>
+    </div>
+
+    <div class="card mb-4">
+      <div class="card-header"><div class="card-title">System Prompt</div></div>
+      <div class="card-body">
+        <div class="form-group">
+          <label>Custom AI System Prompt <span class="hint">(leave empty to use default template)</span></label>
+          <textarea id="s-prompt" rows="16">${escHtml(org.ai_system_prompt || "")}</textarea>
+          <div class="form-hint">Version: ${org.ai_system_prompt_version || 1}</div>
+        </div>
+        <div class="flex-row">
+          <button class="btn btn-primary" onclick="saveSystemPrompt()">Save Prompt</button>
+          ${!currentIsDemo ? `<button class="btn btn-secondary" onclick="showUseTemplateModal('prompt')">Use Template</button>` : ""}
+        </div>
+      </div>
+    </div>
+
+    ${isOwner ? `
+    <div class="card mb-4">
+      <div class="card-header"><div class="card-title">Routing Rules</div></div>
+      <div class="card-body">
+        <p class="text-muted" style="font-size:13px;margin-bottom:12px">
+          Customize when the AI uses each routing code. These rules tell the AI
+          how to classify responses (draft, ignore, escalate, lead detection).
+        </p>
+        <div class="form-group">
+          <textarea id="s-routing-rules" rows="14">${escHtml(org.routing_rules || DEFAULT_ROUTING_RULES_TEXT)}</textarea>
+        </div>
+        <div class="flex-row">
+          <button class="btn btn-primary" onclick="saveRoutingRules()">Save Routing Rules</button>
+          <button class="btn btn-secondary" onclick="resetRoutingRules()">Reset to Defaults</button>
+        </div>
+      </div>
+    </div>` : ""}`;
+}
+
+async function saveAiTone() {
+  try {
+    await api("update_org", {
+      org_id: currentOrgId,
+      updates: { ai_tone: document.getElementById("s-tone").value },
+    });
+    window._orgData.org.ai_tone = document.getElementById("s-tone").value;
+    toast("AI tone updated", "success");
+  } catch (e) { toast(e.message, "error"); }
+}
+
+// ── Business Details (profile + working hours) ───────────────────────────────
+
+async function renderKbBusiness(panel, org) {
+  panel.innerHTML = `<div class="card"><div class="loading-overlay"><div class="spinner"></div> Loading...</div></div>`;
+  try {
+    if (!_kb.biz || _kb.bizOrgId !== org.id) {
+      _kb.biz = await api("get_business_details", { org_id: org.id });
+      _kb.bizOrgId = org.id;
+    }
+    const p = _kb.biz.profile || {};
+    const hours = _kb.biz.hours || [];
+    const v = (x) => escHtml(x || "");
+
+    // Availability mode: no rows = none; all 7 days 00:00-23:59 = 24/7; else custom
+    if (hours.length === 0) _kbHoursMode = "none";
+    else if (hours.length === 7 && hours.every(h => h.is_open && String(h.open_time).slice(0,5) === "00:00" && String(h.close_time).slice(0,5) === "23:59")) _kbHoursMode = "24_7";
+    else _kbHoursMode = "custom";
+
+    const dayNames = { 1: "Monday", 2: "Tuesday", 3: "Wednesday", 4: "Thursday", 5: "Friday", 6: "Saturday", 0: "Sunday" };
+    const dayRows = [1,2,3,4,5,6,0].map(d => {
+      const h = hours.find(x => x.day_of_week === d) || {};
+      const open = String(h.open_time || "09:00").slice(0,5);
+      const close = String(h.close_time || "17:00").slice(0,5);
+      return `
+        <div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);flex-wrap:wrap">
+          <label style="display:flex;align-items:center;gap:6px;width:120px;margin:0;cursor:pointer">
+            <input type="checkbox" id="kb-day-open-${d}" ${h.is_open ? "checked" : ""} style="width:auto" /> ${dayNames[d]}
+          </label>
+          <input type="time" id="kb-day-open-time-${d}" value="${open}" style="width:110px" />
+          <span class="text-muted">to</span>
+          <input type="time" id="kb-day-close-time-${d}" value="${close}" style="width:110px" />
+          <input type="text" id="kb-day-note-${d}" value="${v(h.note)}" placeholder="Note (optional)" style="flex:1;min-width:140px" />
+        </div>`;
+    }).join("");
+
+    const timezones = [
+      { tz: "UTC",                  label: "UTC" },
+      { tz: "Africa/Cairo",         label: "Africa / Cairo (UTC+2)" },
+      { tz: "America/New_York",     label: "US / Eastern Time (UTC-5)" },
+      { tz: "America/Chicago",      label: "US / Central Time (UTC-6)" },
+      { tz: "America/Denver",       label: "US / Mountain Time (UTC-7)" },
+      { tz: "America/Los_Angeles",  label: "US / Pacific Time (UTC-8)" },
+      { tz: "Europe/London",        label: "Europe / London (UTC+0)" },
+      { tz: "Europe/Paris",         label: "Europe / Paris (UTC+1)" },
+      { tz: "Europe/Berlin",        label: "Europe / Berlin (UTC+1)" },
+      { tz: "Europe/Madrid",        label: "Europe / Madrid (UTC+1)" },
+      { tz: "Europe/Rome",          label: "Europe / Rome (UTC+1)" },
+      { tz: "Europe/Amsterdam",     label: "Europe / Amsterdam (UTC+1)" },
+      { tz: "Europe/Istanbul",      label: "Europe / Istanbul (UTC+3)" },
+      { tz: "Europe/Moscow",        label: "Europe / Moscow (UTC+3)" },
+    ];
+
+    const modeBtn = (m, label) =>
+      `<button class="btn ${_kbHoursMode === m ? "btn-primary" : "btn-secondary"} btn-sm" id="kb-mode-${m}" onclick="kbSetHoursMode('${m}')">${label}</button>`;
+
+    panel.innerHTML = `
+      <div class="card mb-4">
+        <div class="card-header"><div class="card-title">Basic Information</div></div>
+        <div class="card-body">
+          <div class="form-row">
+            <div class="form-group">
+              <label>Business Name <span class="hint">(public-facing)</span></label>
+              <input type="text" id="kb-biz-name" value="${v(p.business_name)}" />
+            </div>
+            <div class="form-group">
+              <label>Tagline</label>
+              <input type="text" id="kb-biz-tagline" value="${v(p.tagline)}" />
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Description <span class="hint">(what the business does — the AI uses this to introduce it)</span></label>
+            <textarea id="kb-biz-desc" rows="3">${v(p.description)}</textarea>
+          </div>
+        </div>
+      </div>
+
+      <div class="card mb-4">
+        <div class="card-header"><div class="card-title">Contact &amp; Address</div></div>
+        <div class="card-body">
+          <div class="form-row">
+            <div class="form-group">
+              <label>Phone</label>
+              <input type="text" id="kb-biz-phone" value="${v(p.phone)}" />
+            </div>
+            <div class="form-group">
+              <label>Website</label>
+              <input type="text" id="kb-biz-website" value="${v(p.website_url)}" placeholder="https://" />
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Street Address</label>
+              <input type="text" id="kb-biz-address" value="${v(p.address)}" />
+            </div>
+            <div class="form-group">
+              <label>City</label>
+              <input type="text" id="kb-biz-city" value="${v(p.city)}" />
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>State / Province</label>
+              <input type="text" id="kb-biz-state" value="${v(p.state)}" />
+            </div>
+            <div class="form-group">
+              <label>Postal Code</label>
+              <input type="text" id="kb-biz-postal" value="${v(p.postal_code)}" />
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Country</label>
+              <input type="text" id="kb-biz-country" value="${v(p.country)}" />
+            </div>
+            <div class="form-group"><!-- spacer --></div>
+          </div>
+          <div class="form-group">
+            <label>Email Signature <span class="hint">(appended to AI-drafted emails)</span></label>
+            <textarea id="kb-biz-signature" rows="2">${v(p.email_signature)}</textarea>
+          </div>
+        </div>
+      </div>
+
+      <div class="card mb-4">
+        <div class="card-header"><div class="card-title">Booking &amp; Policies</div></div>
+        <div class="card-body">
+          <div class="form-group">
+            <label>Booking URL <span class="hint">(manual fallback when no calendar is connected)</span></label>
+            <input type="text" id="kb-biz-booking-url" value="${v(p.booking_url)}" placeholder="https://" />
+          </div>
+          <div class="form-group">
+            <label>Booking Instructions</label>
+            <textarea id="kb-biz-booking-instr" rows="2">${v(p.booking_instructions)}</textarea>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Cancellation Policy</label>
+              <textarea id="kb-biz-cancel" rows="2">${v(p.cancellation_policy)}</textarea>
+            </div>
+            <div class="form-group">
+              <label>Deposit Policy</label>
+              <textarea id="kb-biz-deposit" rows="2">${v(p.deposit_policy)}</textarea>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Other Policies</label>
+            <textarea id="kb-biz-other" rows="2">${v(p.other_policies)}</textarea>
+          </div>
+          <button class="btn btn-primary" onclick="saveBusinessProfile()">Save Business Details</button>
+        </div>
+      </div>
+
+      <div class="card mb-4">
+        <div class="card-header"><div class="card-title">Availability</div></div>
+        <div class="card-body">
+          <div class="form-group">
+            <label>Business Hours</label>
+            <div class="flex-row" style="gap:8px;flex-wrap:wrap">
+              ${modeBtn("custom", "Custom Hours")}
+              ${modeBtn("24_7", "24 / 7 Available")}
+              ${modeBtn("none", "No Business Hours")}
+            </div>
+          </div>
+          <div class="form-group" style="max-width:320px">
+            <label>Timezone</label>
+            <select id="kb-biz-timezone">
+              ${timezones.map(o =>
+                `<option value="${o.tz}" ${(org.business_hours_timezone || "UTC") === o.tz ? "selected" : ""}>${o.label}</option>`
+              ).join("")}
+            </select>
+            <div class="form-hint">Used for business hours and calendar bookings.</div>
+          </div>
+          <div id="kb-hours-custom" style="display:${_kbHoursMode === "custom" ? "" : "none"}">
+            ${dayRows}
+            <div style="margin-top:8px">
+              <button class="btn btn-ghost btn-sm" onclick="kbCopyMonday()">Copy Monday to Tue–Fri</button>
+            </div>
+          </div>
+          <div id="kb-hours-247" class="alert alert-info" style="display:${_kbHoursMode === "24_7" ? "" : "none"}">The AI will tell customers you're always open.</div>
+          <div id="kb-hours-none" class="alert alert-info" style="display:${_kbHoursMode === "none" ? "" : "none"}">No hours saved — the AI won't quote opening hours.</div>
+          <div style="margin-top:14px">
+            <button class="btn btn-primary" onclick="saveBusinessHours()">Save Availability</button>
+          </div>
+        </div>
+      </div>`;
+  } catch (e) {
+    panel.innerHTML = `<div class="card"><div class="card-body"><div class="alert alert-danger">${escHtml(e.message)}</div></div></div>`;
+  }
+}
+
+function kbSetHoursMode(mode) {
+  _kbHoursMode = mode;
+  for (const m of ["custom", "24_7", "none"]) {
+    const btn = document.getElementById(`kb-mode-${m}`);
+    if (btn) btn.className = `btn ${m === mode ? "btn-primary" : "btn-secondary"} btn-sm`;
+  }
+  document.getElementById("kb-hours-custom").style.display = mode === "custom" ? "" : "none";
+  document.getElementById("kb-hours-247").style.display = mode === "24_7" ? "" : "none";
+  document.getElementById("kb-hours-none").style.display = mode === "none" ? "" : "none";
+}
+
+function kbCopyMonday() {
+  for (const d of [2, 3, 4, 5]) {
+    document.getElementById(`kb-day-open-${d}`).checked = document.getElementById("kb-day-open-1").checked;
+    document.getElementById(`kb-day-open-time-${d}`).value = document.getElementById("kb-day-open-time-1").value;
+    document.getElementById(`kb-day-close-time-${d}`).value = document.getElementById("kb-day-close-time-1").value;
+  }
+  toast("Monday copied to Tuesday–Friday", "success");
+}
+
+async function saveBusinessProfile() {
+  const g = (id) => document.getElementById(id).value;
+  try {
+    await api("update_business_profile", {
+      org_id: currentOrgId,
+      updates: {
+        business_name: g("kb-biz-name"),
+        tagline: g("kb-biz-tagline"),
+        description: g("kb-biz-desc"),
+        phone: g("kb-biz-phone"),
+        website_url: g("kb-biz-website"),
+        address: g("kb-biz-address"),
+        city: g("kb-biz-city"),
+        state: g("kb-biz-state"),
+        postal_code: g("kb-biz-postal"),
+        country: g("kb-biz-country"),
+        email_signature: g("kb-biz-signature"),
+        booking_url: g("kb-biz-booking-url"),
+        booking_instructions: g("kb-biz-booking-instr"),
+        cancellation_policy: g("kb-biz-cancel"),
+        deposit_policy: g("kb-biz-deposit"),
+        other_policies: g("kb-biz-other"),
+      },
+    });
+    if (_kb) _kb.biz = null; // invalidate cache
+    toast("Business details saved", "success");
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function saveBusinessHours() {
+  try {
+    let hours = [];
+    if (_kbHoursMode === "24_7") {
+      hours = [0,1,2,3,4,5,6].map(d => ({ day_of_week: d, is_open: true, open_time: "00:00", close_time: "23:59" }));
+    } else if (_kbHoursMode === "custom") {
+      hours = [1,2,3,4,5,6,0].map(d => ({
+        day_of_week: d,
+        is_open: document.getElementById(`kb-day-open-${d}`).checked,
+        open_time: document.getElementById(`kb-day-open-time-${d}`).value || null,
+        close_time: document.getElementById(`kb-day-close-time-${d}`).value || null,
+        note: document.getElementById(`kb-day-note-${d}`).value,
+      }));
+    }
+    const timezone = document.getElementById("kb-biz-timezone").value;
+    await api("update_org", { org_id: currentOrgId, updates: { business_hours_timezone: timezone } });
+    await api("update_business_hours", { org_id: currentOrgId, hours });
+    window._orgData.org.business_hours_timezone = timezone;
+    if (_kb) _kb.biz = null; // invalidate cache
+    toast("Availability saved", "success");
+  } catch (e) { toast(e.message, "error"); }
+}
+
+// ── Knowledge Base (versioned sections editor) ───────────────────────────────
+
+function kbKnowledgeHtml() {
+  return `
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Knowledge Base ${_kb.activeVersionNum ? `<span class="badge badge-blue" style="margin-left:6px">v${_kb.activeVersionNum}</span>` : ""}</div>
+        <div class="flex-row">
+          ${!currentIsDemo ? `<button class="btn btn-secondary btn-sm" onclick="showUseTemplateModal('kb')">Use Template</button>` : ""}
+          <button class="btn btn-primary btn-sm" onclick="kbAddSection()">${ICONS.plus} Add Section</button>
+        </div>
+      </div>
+      <div id="kb-sections"></div>
+      <div class="card-body" id="kb-save-bar" style="display:none;border-top:1px solid var(--border)">
+        <div class="form-group" style="margin-bottom:8px">
+          <label>Change summary <span class="hint">(required — becomes the version's history entry)</span></label>
+          <input type="text" id="kb-change-summary" placeholder="e.g. Updated refund policy" />
+        </div>
+        <div class="flex-row">
+          <button class="btn btn-primary" id="kb-save-btn" onclick="kbSaveVersion()">Save as New Version</button>
+          <button class="btn btn-secondary" onclick="renderKbTab(document.getElementById('tab-content'), null, window._orgData.org)">Discard Changes</button>
+        </div>
+      </div>
+    </div>
+    ${kbVersionHistoryHtml(_kb.versions)}`;
+}
+
+// ── Change Requests (customer-submitted, pending review) ─────────────────────
+
+function kbChangesHtml() {
+  const pending = (_kb.requests || []).filter(r => r.status === "pending");
+  if (pending.length === 0) {
+    return `<div class="card"><div class="card-body"><div class="empty-state"><p>No pending change requests. Requests customers file from their dashboard show up here for review.</p></div></div></div>`;
+  }
+  return kbAmendRequestsHtml(_kb.requests);
 }
 
 function kbRenderSections() {
@@ -2417,35 +2796,14 @@ async function disconnectCalendly() {
 // ── Settings Tab ─────────────────────────────────────────────────────────────
 
 function renderSettingsTab(el, org) {
-  // Demo orgs: salespeople can only edit AI Tone
+  // Demo orgs: AI settings for salespeople live in KB → Personality
   if (currentIsDemo && !isOwner) {
     el.innerHTML = `
-      <div class="card mb-4">
-        <div class="card-header"><div class="card-title">Demo Settings</div></div>
+      <div class="card">
         <div class="card-body">
-          <div class="form-group">
-            <label>AI Tone</label>
-            <select id="s-tone">
-              ${["professional","friendly","formal","casual"].map(t =>
-                `<option value="${t}" ${org.ai_tone===t?"selected":""}>${t.charAt(0).toUpperCase()+t.slice(1)}</option>`
-              ).join("")}
-            </select>
+          <div class="empty-state">
+            <p>AI tone and the system prompt now live in the <strong>Knowledge Base</strong> tab under <strong>Personality</strong>.</p>
           </div>
-          <div style="margin-top:16px">
-            <button class="btn btn-primary" onclick="saveDemoTone()">Save Tone</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="card mb-4">
-        <div class="card-header"><div class="card-title">System Prompt</div></div>
-        <div class="card-body">
-          <div class="form-group">
-            <label>Custom AI System Prompt <span class="hint">(leave empty to use default template)</span></label>
-            <textarea id="s-prompt" rows="16">${escHtml(org.ai_system_prompt || "")}</textarea>
-            <div class="form-hint">Version: ${org.ai_system_prompt_version || 1}</div>
-          </div>
-          <button class="btn btn-primary" onclick="saveSystemPrompt()">Save Prompt</button>
         </div>
       </div>`;
     return;
@@ -2482,39 +2840,6 @@ function renderSettingsTab(el, org) {
           <div class="form-group">
             <label>Slug</label>
             <input type="text" id="s-slug" value="${escHtml(org.slug)}" />
-          </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label>Timezone</label>
-            <select id="s-timezone">
-              ${[
-                { tz: "UTC",                  label: "UTC" },
-                { tz: "Africa/Cairo",         label: "Africa / Cairo (UTC+2)" },
-                { tz: "America/New_York",     label: "US / Eastern Time (UTC-5)" },
-                { tz: "America/Chicago",      label: "US / Central Time (UTC-6)" },
-                { tz: "America/Denver",       label: "US / Mountain Time (UTC-7)" },
-                { tz: "America/Los_Angeles",  label: "US / Pacific Time (UTC-8)" },
-                { tz: "Europe/London",        label: "Europe / London (UTC+0)" },
-                { tz: "Europe/Paris",         label: "Europe / Paris (UTC+1)" },
-                { tz: "Europe/Berlin",        label: "Europe / Berlin (UTC+1)" },
-                { tz: "Europe/Madrid",        label: "Europe / Madrid (UTC+1)" },
-                { tz: "Europe/Rome",          label: "Europe / Rome (UTC+1)" },
-                { tz: "Europe/Amsterdam",     label: "Europe / Amsterdam (UTC+1)" },
-                { tz: "Europe/Istanbul",      label: "Europe / Istanbul (UTC+3)" },
-                { tz: "Europe/Moscow",        label: "Europe / Moscow (UTC+3)" },
-              ].map(o =>
-                `<option value="${o.tz}" ${(org.business_hours_timezone || "UTC") === o.tz ? "selected" : ""}>${o.label}</option>`
-              ).join("")}
-            </select>
-          </div>
-          <div class="form-group">
-            <label>AI Tone</label>
-            <select id="s-tone">
-              ${["professional","friendly","formal","casual"].map(t =>
-                `<option value="${t}" ${org.ai_tone===t?"selected":""}>${t.charAt(0).toUpperCase()+t.slice(1)}</option>`
-              ).join("")}
-            </select>
           </div>
         </div>
         <div class="form-row">
@@ -2595,40 +2920,8 @@ function renderSettingsTab(el, org) {
       </div>
     </div>
 
-    <div class="card mb-4">
-      <div class="card-header"><div class="card-title">System Prompt</div></div>
-      <div class="card-body">
-        <div class="form-group">
-          <label>Custom AI System Prompt <span class="hint">(leave empty to use default template)</span></label>
-          <textarea id="s-prompt" rows="16">${escHtml(org.ai_system_prompt || "")}</textarea>
-          <div class="form-hint">Version: ${org.ai_system_prompt_version || 1}</div>
-        </div>
-        <div class="flex-row">
-          <button class="btn btn-primary" onclick="saveSystemPrompt()">Save Prompt</button>
-          ${!currentIsDemo ? `<button class="btn btn-secondary" onclick="showUseTemplateModal('prompt')">Use Template</button>` : ""}
-        </div>
-      </div>
-    </div>
-
     ${isOwner ? `
-    <div class="card mb-4">
-      <div class="card-header"><div class="card-title">Routing Rules</div></div>
-      <div class="card-body">
-        <p class="text-muted" style="font-size:13px;margin-bottom:12px">
-          Customize when the AI uses each routing code. These rules tell the AI
-          how to classify responses (draft, ignore, escalate, lead detection).
-        </p>
-        <div class="form-group">
-          <textarea id="s-routing-rules" rows="14">${escHtml(org.routing_rules || DEFAULT_ROUTING_RULES_TEXT)}</textarea>
-        </div>
-        <div class="flex-row">
-          <button class="btn btn-primary" onclick="saveRoutingRules()">Save Routing Rules</button>
-          <button class="btn btn-secondary" onclick="resetRoutingRules()">Reset to Defaults</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="card" style="border-color:rgba(239,68,68,0.3)">
+    <div class="card mb-4" style="border-color:rgba(239,68,68,0.3)">
       <div class="card-header" style="border-color:rgba(239,68,68,0.3)">
         <div class="card-title" style="color:var(--danger)">Reset Usage</div>
       </div>
@@ -2663,24 +2956,10 @@ function renderSettingsTab(el, org) {
     </div>` : ""}`;
 }
 
-async function saveDemoTone() {
-  try {
-    await api("update_org", {
-      org_id: currentOrgId,
-      updates: { ai_tone: document.getElementById("s-tone").value },
-    });
-    toast("AI tone updated", "success");
-    const { org } = await api("get_org", { org_id: currentOrgId });
-    window._orgData.org = org;
-  } catch (e) { toast(e.message, "error"); }
-}
-
 async function saveOrgSettings() {
   const updates = {
     name: document.getElementById("s-name").value.trim(),
     slug: document.getElementById("s-slug").value.trim(),
-    business_hours_timezone: document.getElementById("s-timezone").value,
-    ai_tone: document.getElementById("s-tone").value,
     subscription_tier: document.getElementById("s-tier").value,
     subscription_plan: document.getElementById("s-plan").value,
   };

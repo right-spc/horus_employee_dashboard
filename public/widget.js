@@ -686,7 +686,7 @@
         ${config.position === 'left' ? 'left: 24px;' : 'right: 24px;'}
         bottom: 96px;
         width: 380px;
-        max-height: min(600px, calc(100vh - 120px));
+        height: min(650px, calc(100vh - 120px));
         background: var(--horus-bg);
         border-radius: 12px;
         box-shadow: 0 8px 32px rgba(0,0,0,0.2);

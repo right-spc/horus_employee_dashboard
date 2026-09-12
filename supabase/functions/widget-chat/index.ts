@@ -512,6 +512,254 @@ Deno.serve(async (req: Request) => {
       if (googleCalendarProvider) toolsArr.push(BOOK_APPOINTMENT_TOOL);
     }
 
+    // ── 11b. STREAMING MODE ─────────────────
+    // Identical pipeline to the buffered path below, but the visitor watches
+    // the reply generate: response_text tokens are forwarded as SSE delta
+    // events, then a terminal done event carries the authoritative final
+    // message + routing flags. ALL side effects (persistence, escalation,
+    // usage counters, analytics) run exactly as in the buffered path, after
+    // generation completes — even if the visitor disconnects mid-stream.
+    if ((body as unknown as Record<string, unknown>).stream === true) {
+      const encoder = new TextEncoder();
+      const streamBody = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          const send = (obj: unknown) => {
+            try {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
+            } catch { /* visitor gone — keep processing so the reply is still saved */ }
+          };
+          try {
+            let totalInputTokens = 0;
+            let totalCachedTokens = 0;
+            let totalOutputTokens = 0;
+            let toolUseIterations = 0;
+            let submitResponseData: Record<string, unknown> | null = null;
+            let rawResponseText = "";
+
+            const runStreamedCall = async () => {
+              const upstream = await callKimiStream({
+                model: KIMI_MODEL,
+                max_tokens: 2000,
+                reasoning_effort: REASONING_EFFORT,
+                messages: kimiMessages,
+                tools: toolsArr,
+                tool_choice: "required",
+                stream: true,
+                stream_options: { include_usage: true },
+              });
+              const r = await pumpKimiStream(upstream, (t) => send({ type: "delta", text: t }));
+              totalInputTokens += r.usage.prompt_tokens;
+              totalCachedTokens += r.usage.cached_tokens;
+              totalOutputTokens += r.usage.completion_tokens;
+              rawResponseText = r.content;
+              return r;
+            };
+
+            // Tool-use loop — same semantics as the buffered loop below
+            let r = await runStreamedCall();
+            while (r.finishReason === "tool_calls" && toolUseIterations < 3) {
+              toolUseIterations++;
+              console.log(`Tool use iteration ${toolUseIterations} (stream), tools called:`, r.toolCalls.map((t) => t.name));
+
+              const submitCall = r.toolCalls.find((t) => t.name === "submit_response");
+              if (submitCall) {
+                submitResponseData = parseToolArguments(submitCall.arguments);
+              }
+
+              const toolResultMessages: any[] = [];
+              for (const toolCall of r.toolCalls) {
+                const toolInput = parseToolArguments(toolCall.arguments);
+                if (toolCall.name === "submit_response") {
+                  toolResultMessages.push({
+                    role: "tool",
+                    tool_call_id: toolCall.id,
+                    content: JSON.stringify({ received: true }),
+                  });
+                  continue;
+                }
+                let result;
+                if (toolCall.name === "book_appointment" && googleCalendarProvider) {
+                  const profile = (org.business_profiles as Record<string, unknown>[])?.[0];
+                  const bName = (profile?.business_name as string) || "the business";
+                  result = await executeBookingTool(
+                    supabase, googleCalendarProvider, toolInput,
+                    businessTimezone, bName, customerTimezone
+                  );
+                } else if (calendlyIntegration) {
+                  result = await executeCalendlyTool(
+                    supabase, calendlyIntegration, toolCall.name, toolInput,
+                    customerTimezone
+                  );
+                } else {
+                  result = { error: true, message: "Unknown tool" };
+                }
+                toolResultMessages.push({
+                  role: "tool",
+                  tool_call_id: toolCall.id,
+                  content: JSON.stringify(result),
+                });
+              }
+
+              if (submitResponseData) break;
+
+              kimiMessages.push({
+                role: "assistant",
+                content: r.content ?? "",
+                tool_calls: r.toolCalls.map((t) => ({
+                  id: t.id,
+                  type: "function",
+                  function: { name: t.name, arguments: t.arguments },
+                })),
+              });
+              kimiMessages.push(...toolResultMessages);
+
+              r = await runStreamedCall();
+            }
+
+            const processingTimeMs = Date.now() - startTime;
+            const tokensUsed = totalInputTokens + totalOutputTokens;
+            const costEstimate =
+              (totalInputTokens - totalCachedTokens) * KIMI_COST_INPUT +
+              totalCachedTokens * KIMI_COST_CACHED_INPUT +
+              totalOutputTokens * KIMI_COST_OUTPUT;
+
+            // ── 12-15. PARSE / ROUTE / SAVE / USAGE — identical to buffered ──
+            let parsed: RouteParseResult;
+            if (submitResponseData) {
+              parsed = parseSubmitResponse(submitResponseData);
+            } else {
+              parsed = parseClaudeResponse(rawResponseText);
+              if (toolUseIterations > 0 && parsed.confidence === 0.0) {
+                parsed.confidence = 0.85;
+              }
+            }
+            if (!parsed.response_text?.trim()) {
+              parsed.response_text = "I've looked into that for you. Could you tell me a bit more about what you need so I can help further?";
+              parsed.confidence = 0.50;
+            }
+
+            const effectiveCode = parsed.code === "IGNORE" ? "DRAFT" : parsed.code;
+            const responseText = parsed.code === "IGNORE"
+              ? (parsed.response_text || "I'm not sure I understood that. Could you rephrase?")
+              : parsed.response_text;
+            const willEscalate = effectiveCode === "ESCALATE" || isEscalated;
+            const messageStatus = "auto_sent"; // Webchat always auto-sends
+
+            const { data: aiMessage, error: aiMsgError } = await supabase
+              .schema("messaging").from("messages")
+              .insert({
+                conversation_id: conversation.id,
+                organization_id: organizationId,
+                role: "ai",
+                content: responseText,
+                status: messageStatus,
+                routing_code: effectiveCode,
+                confidence_score_reported: parsed.confidence,
+                ai_model: KIMI_MODEL,
+                ai_prompt_version: org.ai_system_prompt_version,
+                processing_time_ms: processingTimeMs,
+                tokens_used: tokensUsed,
+                cost_estimate: costEstimate,
+                escalation_type: parsed.escalation_type,
+                lead_priority: parsed.lead_priority,
+              })
+              .select("id")
+              .single();
+
+            if (aiMsgError || !aiMessage) {
+              throw new Error(`Failed to save AI message: ${aiMsgError?.message}`);
+            }
+
+            if (effectiveCode === "ESCALATE" && !isEscalated) {
+              const notifyAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+              await supabase
+                .schema("messaging").from("conversations")
+                .update({
+                  status: "escalated",
+                  escalation_reason: "AI determined human intervention required",
+                  escalation_type: parsed.escalation_type,
+                  lead_priority: parsed.lead_priority,
+                  escalation_notify_at: notifyAt,
+                })
+                .eq("id", conversation.id);
+              await supabase.schema("analytics").from("analytics_events").insert({
+                organization_id: organizationId,
+                event_type: "escalated",
+                metadata: {
+                  conversation_id: conversation.id,
+                  channel: "webchat",
+                  escalation_type: parsed.escalation_type,
+                  lead_priority: parsed.lead_priority,
+                },
+              });
+            } else if (effectiveCode === "ESCALATE" && isEscalated) {
+              await supabase
+                .schema("messaging").from("conversations")
+                .update({
+                  escalation_type: parsed.escalation_type,
+                  lead_priority: parsed.lead_priority,
+                })
+                .eq("id", conversation.id);
+            }
+
+            await supabase
+              .schema("messaging").from("conversations")
+              .update({ last_ai_response_at: new Date().toISOString() })
+              .eq("id", conversation.id);
+
+            if (parsed.subject) {
+              await supabase
+                .schema("messaging").from("conversations")
+                .update({ subject: parsed.subject })
+                .eq("id", conversation.id);
+            }
+
+            await supabase.schema("analytics").from("analytics_events").insert({
+              organization_id: organizationId,
+              event_type: "ai_generated",
+              metadata: {
+                conversation_id: conversation.id,
+                routing_code: effectiveCode,
+                confidence: parsed.confidence,
+                channel: "webchat",
+              },
+            });
+
+            if (effectiveCode !== "IGNORE") {
+              const justExceeded = await incrementUsage(supabase, organizationId);
+              if (justExceeded) {
+                handleLimitExceeded(supabase, organizationId).catch((e) =>
+                  console.error("handleLimitExceeded error:", e.message)
+                );
+              }
+            }
+
+            send({
+              type: "done",
+              message: responseText,
+              quickReplies: [],
+              escalated: willEscalate,
+              sessionId,
+            });
+          } catch (e) {
+            console.error("widget-chat stream error:", (e as Error)?.message);
+            send({ type: "error", error: "Something went wrong. Please try again." });
+          }
+          controller.close();
+        },
+      });
+      return new Response(streamBody, {
+        status: 200,
+        headers: {
+          ...CORS_HEADERS,
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Access-Control-Allow-Origin": allowedOrigin,
+          "Vary": "Origin",
+        },
+      });
+    }
+
     let kimiResponse = await callKimiWithRetry({
       model: KIMI_MODEL,
       max_tokens: 2000,
@@ -1110,6 +1358,78 @@ class ResponseTextExtractor {
     this.buf = this.buf.slice(i);
     return out;
   }
+}
+
+interface PumpedKimiStream {
+  toolCalls: Array<{ id: string; name: string; arguments: string }>;
+  content: string;
+  finishReason: string | null;
+  usage: { prompt_tokens: number; cached_tokens: number; completion_tokens: number };
+}
+
+// Reads one streaming Kimi call end-to-end. Assembles tool calls by index,
+// extracts submit_response's response_text incrementally (forwarded via
+// onResponseTextDelta as it generates), streams any plain content too, and
+// captures the final usage chunk (stream_options.include_usage).
+async function pumpKimiStream(
+  upstream: ReadableStream<Uint8Array>,
+  onResponseTextDelta: (text: string) => void,
+): Promise<PumpedKimiStream> {
+  const extractor = new ResponseTextExtractor();
+  const toolCalls: Array<{ id: string; name: string; arguments: string }> = [];
+  let content = "";
+  let finishReason: string | null = null;
+  const usage = { prompt_tokens: 0, cached_tokens: 0, completion_tokens: 0 };
+
+  const reader = upstream.getReader();
+  const decoder = new TextDecoder();
+  let lineBuf = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    lineBuf += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = lineBuf.indexOf("\n")) >= 0) {
+      const line = lineBuf.slice(0, nl).trim();
+      lineBuf = lineBuf.slice(nl + 1);
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (!data || data === "[DONE]") continue;
+      let chunk: any;
+      try { chunk = JSON.parse(data); } catch { continue; }
+      if (chunk.usage) {
+        usage.prompt_tokens = chunk.usage.prompt_tokens ?? 0;
+        usage.cached_tokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? 0;
+        usage.completion_tokens = chunk.usage.completion_tokens ?? 0;
+      }
+      const choice = chunk.choices?.[0];
+      if (!choice) continue;
+      if (choice.finish_reason) finishReason = choice.finish_reason;
+      const delta = choice.delta;
+      if (!delta) continue;
+      const tcs = delta.tool_calls;
+      if (Array.isArray(tcs)) {
+        for (const tc of tcs) {
+          const idx = tc.index ?? 0;
+          if (!toolCalls[idx]) toolCalls[idx] = { id: "", name: "", arguments: "" };
+          if (tc.id) toolCalls[idx].id = tc.id;
+          const fn = tc.function;
+          if (fn?.name) toolCalls[idx].name = fn.name;
+          if (typeof fn?.arguments === "string") {
+            toolCalls[idx].arguments += fn.arguments;
+            if (toolCalls[idx].name === "submit_response") {
+              const piece = extractor.push(fn.arguments);
+              if (piece) onResponseTextDelta(piece);
+            }
+          }
+        }
+      } else if (typeof delta.content === "string" && delta.content) {
+        content += delta.content;
+        onResponseTextDelta(delta.content);
+      }
+    }
+  }
+  return { toolCalls: toolCalls.filter(Boolean), content, finishReason, usage };
 }
 
 // Streaming test chat: calls Kimi with stream:true and forwards the visible

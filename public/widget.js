@@ -438,9 +438,16 @@
       }
     }
 
-    async sendChat(sessionId, visitorData, message, metadata) {
+    async sendChat(sessionId, visitorData, message, metadata, onDelta) {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout — AI pipeline (KB lookup + Claude + tool calls) can exceed 15s
+      // With streaming enabled the AI writes the reply live, so a single flat
+      // timeout would cut long answers off — instead abort only on stalls
+      // (no chunk for 45s). Non-streaming keeps the original flat 60s.
+      let timeoutId = setTimeout(() => controller.abort(), onDelta ? 45000 : 60000);
+      const armStallTimer = () => {
+        clearTimeout(timeoutId);
+        timeoutId = setTimeout(() => controller.abort(), 45000);
+      };
       this.abortControllers.push(controller);
 
       try {
@@ -454,19 +461,28 @@
             message,
             timestamp: getISOTimestamp(),
             metadata,
+            stream: true,
           }),
           signal: controller.signal,
         });
-
-        clearTimeout(timeoutId);
 
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
         }
 
+        // Streaming SSE reply — forward text deltas as they arrive
+        const contentType = response.headers.get('content-type') || '';
+        if (contentType.includes('text/event-stream') && response.body) {
+          const result = await this._readChatStream(response.body, armStallTimer, onDelta);
+          clearTimeout(timeoutId);
+          return result;
+        }
+
+        clearTimeout(timeoutId);
         const data = await response.json();
         return { success: true, data };
       } catch (error) {
+        clearTimeout(timeoutId);
         if (error.name === 'AbortError') {
           return { success: false, timeout: true };
         }
@@ -474,6 +490,40 @@
       } finally {
         this._removeController(controller);
       }
+    }
+
+    /**
+     * Read a widget-chat SSE stream: {type:"delta",text} events as the reply
+     * generates, then one terminal {type:"done",…} or {type:"error",…}.
+     */
+    async _readChatStream(streamBody, onChunk, onDelta) {
+      const reader = streamBody.getReader();
+      const decoder = new TextDecoder();
+      let lineBuf = '';
+      let donePayload = null;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        onChunk();
+        lineBuf += decoder.decode(value, { stream: true });
+        let nl;
+        while ((nl = lineBuf.indexOf('\n')) >= 0) {
+          const line = lineBuf.slice(0, nl).trim();
+          lineBuf = lineBuf.slice(nl + 1);
+          if (!line.startsWith('data:')) continue;
+          let evt;
+          try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
+          if (evt.type === 'delta' && evt.text) {
+            if (onDelta) onDelta(evt.text);
+          } else if (evt.type === 'done') {
+            donePayload = evt;
+          } else if (evt.type === 'error') {
+            return { success: false, error: evt.error || 'Stream failed' };
+          }
+        }
+      }
+      if (!donePayload) return { success: false, error: 'Stream ended unexpectedly' };
+      return { success: true, data: donePayload, streamed: true };
     }
 
     async submitSurvey(surveyData) {
@@ -1345,6 +1395,8 @@
       this.activeQuickReplySet = null;
       this.pendingMessage = null;
       this.retryAfter = 300;
+      this.streamMessageEl = null;  // live bubble while a reply streams in
+      this.streamText = '';
 
       // Bind methods
       this.handleKeyDown = this.handleKeyDown.bind(this);
@@ -2106,7 +2158,8 @@
         this.sessionId,
         this.visitorData,
         message,
-        metadata
+        metadata,
+        (text) => this.appendStreamDelta(text)
       );
 
       this.hideTypingIndicator();
@@ -2124,18 +2177,44 @@
           this.storage.set('session', session);
         }
 
-        // Add AI response
-        this.addMessage({
-          role: 'ai',
-          content: response.message,
-          quickReplies: response.quickReplies,
-        });
+        if (result.streamed && this.streamMessageEl) {
+          // Finalize the live bubble with the authoritative final text, then
+          // store the message (already rendered — no re-render needed)
+          const contentEl = this.streamMessageEl.querySelector('.horus-message-content');
+          if (contentEl) contentEl.innerHTML = formatAIMessage(response.message);
+          this.streamMessageEl = null;
+          this.streamText = '';
+          this.messages = this.storage.addMessage({
+            role: 'ai',
+            content: response.message,
+            quickReplies: response.quickReplies,
+          });
+          this.lastMessageTime = Date.now();
+          if (response.quickReplies && response.quickReplies.length > 0) {
+            this.renderQuickReplies(response.quickReplies);
+          }
+          this.scrollToBottom();
+        } else {
+          // Add AI response
+          this.addMessage({
+            role: 'ai',
+            content: response.message,
+            quickReplies: response.quickReplies,
+          });
+        }
 
         // Store escalated flag
         if (response.escalated) {
           this.lastEscalated = true;
         }
       } else {
+        // Drop any partial streamed text — the history recovery below will
+        // fetch the stored reply if the server still completed it
+        if (this.streamMessageEl) {
+          this.streamMessageEl.remove();
+          this.streamMessageEl = null;
+          this.streamText = '';
+        }
         // Show error
         let errorMessage = 'Sorry, something went wrong. Please try again.';
         let showRetry = true;
@@ -2330,6 +2409,32 @@
       });
 
       this.messagesArea.appendChild(container);
+    }
+
+    /**
+     * Append a streamed text delta to the live AI bubble (created on first
+     * delta, replacing the typing indicator)
+     */
+    appendStreamDelta(text) {
+      if (!this.streamMessageEl) {
+        this.hideTypingIndicator();
+        this.streamText = '';
+        const el = document.createElement('div');
+        el.className = 'horus-message ai';
+        el.innerHTML = `
+          <div class="horus-message-avatar">${ICONS.robot}</div>
+          <div>
+            <div class="horus-message-content"></div>
+            <div class="horus-message-time">${formatTime(new Date())}</div>
+          </div>
+        `;
+        this.messagesArea.appendChild(el);
+        this.streamMessageEl = el;
+      }
+      this.streamText += text;
+      const contentEl = this.streamMessageEl.querySelector('.horus-message-content');
+      if (contentEl) contentEl.innerHTML = formatAIMessage(this.streamText);
+      this.scrollToBottom();
     }
 
     /**

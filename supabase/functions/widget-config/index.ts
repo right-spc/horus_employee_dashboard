@@ -56,6 +56,8 @@ Deno.serve(async (req: Request) => {
         required_fields,
         form_title,
         form_subtitle,
+        disclaimer_enabled,
+        disclaimer_text,
         colors,
         allowed_domains,
         organization_id
@@ -115,6 +117,10 @@ Deno.serve(async (req: Request) => {
       requiredFields: config.required_fields ?? [],
       formTitle: config.form_title,
       formSubtitle: config.form_subtitle,
+
+      // Pre-chat disclaimer (consent gate)
+      disclaimerEnabled: config.disclaimer_enabled ?? false,
+      disclaimerText: config.disclaimer_text ?? "",
 
       // Theme
       colors: config.colors ?? {

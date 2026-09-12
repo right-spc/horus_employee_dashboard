@@ -1316,6 +1316,16 @@ function renderWidgetTab(el, widget, org) {
           <label>Welcome Message</label>
           <textarea id="w-welcome" rows="2">${escHtml(widget.welcome_message || "")}</textarea>
         </div>
+        <div class="form-group" style="margin-top:4px">
+          <label style="text-transform:none;letter-spacing:0;font-size:13px;display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400">
+            <input type="checkbox" id="w-disclaimer-enabled" ${widget.disclaimer_enabled?"checked":""}> Require disclaimer acceptance before chatting
+          </label>
+          <div class="form-hint">Visitors must tick a box agreeing to this text before the chat starts. Links: [Terms of Use](https://yoursite.com/terms)</div>
+        </div>
+        <div class="form-group">
+          <label>Disclaimer Text</label>
+          <textarea id="w-disclaimer-text" rows="3" maxlength="1000" placeholder="By chatting with us you agree to our [Terms of Use](https://…) and [Privacy Policy](https://…).">${escHtml(widget.disclaimer_text || "")}</textarea>
+        </div>
         <button class="btn btn-primary" style="margin-top:16px" onclick="saveWidgetConfig()">
           Save Widget Settings
         </button>
@@ -1391,7 +1401,7 @@ function renderWidgetTab(el, widget, org) {
     </div>` : ""}
 
     <div class="card mb-4">
-      <div class="card-header"><div class="card-title">Pre-Chat Form</div></div>
+      <div class="card-header"><div class="card-title">Pre-Chat Gate</div></div>
       <div class="card-body">
         <div class="form-row">
           <div class="form-group">
@@ -1773,6 +1783,8 @@ async function saveWidgetConfig() {
       form_subtitle: document.getElementById("w-form-subtitle")?.value.trim(),
       capture_fields: captureFields,
       required_fields: requiredFields,
+      disclaimer_enabled: !!document.getElementById("w-disclaimer-enabled")?.checked,
+      disclaimer_text: document.getElementById("w-disclaimer-text")?.value.trim() || "",
       colors: { light, dark },
     };
     if (domains !== null) updates.allowed_domains = domains;

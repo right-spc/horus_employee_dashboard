@@ -140,6 +140,29 @@
   }
 
   /**
+   * Render disclaimer text: escape everything, then convert markdown-style
+   * [label](https://url) into safe links that open in a new tab.
+   */
+  function renderDisclaimer(text) {
+    if (!text) return '';
+    return escapeHTML(text).replace(
+      /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>'
+    );
+  }
+
+  /**
+   * Small stable hash (djb2) for the disclaimer version stamp
+   */
+  function hashString(str) {
+    let h = 5381;
+    for (let i = 0; i < str.length; i++) {
+      h = ((h << 5) + h + str.charCodeAt(i)) >>> 0;
+    }
+    return h.toString(36);
+  }
+
+  /**
    * Format AI message: escape HTML, then convert markdown bold/italic/links to HTML
    */
   function formatAIMessage(input) {
@@ -1115,6 +1138,110 @@
         opacity: 0.9;
       }
 
+      .horus-form-submit:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+
+      .horus-form-submit:disabled:hover {
+        opacity: 0.45;
+      }
+
+      /* Pre-chat gate layout (branded start screen) */
+      .horus-gate {
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        min-height: 0;
+      }
+
+      .horus-gate .horus-form-title {
+        text-align: center;
+      }
+
+      .horus-gate .horus-form-subtitle {
+        text-align: center;
+      }
+
+      .horus-gate-logo {
+        display: flex;
+        justify-content: center;
+        margin-bottom: 16px;
+      }
+
+      .horus-gate-logo img {
+        width: 72px;
+        height: 72px;
+        border-radius: 50%;
+        object-fit: cover;
+        box-shadow: 0 4px 14px rgba(0,0,0,0.18);
+      }
+
+      .horus-gate .horus-form-submit {
+        margin-top: auto;
+      }
+
+      /* Disclaimer consent block */
+      .horus-disclaimer {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+        padding: 12px;
+        border: 1px solid var(--horus-border);
+        border-radius: 10px;
+        margin-bottom: 16px;
+        cursor: pointer;
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      .horus-disclaimer input {
+        position: absolute;
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+
+      .horus-disclaimer-box {
+        width: 18px;
+        height: 18px;
+        border: 1.5px solid var(--horus-border);
+        border-radius: 5px;
+        flex-shrink: 0;
+        margin-top: 1px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: background 0.15s, border-color 0.15s;
+      }
+
+      .horus-disclaimer input:checked + .horus-disclaimer-box {
+        background: var(--horus-header-bg);
+        border-color: var(--horus-header-bg);
+      }
+
+      .horus-disclaimer input:checked + .horus-disclaimer-box::after {
+        content: '';
+        width: 5px;
+        height: 9px;
+        border: solid var(--horus-header-text);
+        border-width: 0 2px 2px 0;
+        transform: rotate(45deg) translateY(-1px);
+      }
+
+      .horus-disclaimer input:focus-visible + .horus-disclaimer-box {
+        box-shadow: 0 0 0 3px ${colors.headerBg}40;
+      }
+
+      .horus-disclaimer-text {
+        color: var(--horus-input-text);
+      }
+
+      .horus-disclaimer-text a {
+        color: var(--horus-header-bg);
+        text-decoration: underline;
+      }
+
       /* Survey Modal */
       .horus-survey-overlay {
         position: fixed;
@@ -1419,6 +1546,7 @@
       this.retryAfter = 300;
       this.streamMessageEl = null;  // live bubble while a reply streams in
       this.streamText = '';
+      this.consentData = null;      // disclaimer acceptance (lazy-loaded from storage)
 
       // Bind methods
       this.handleKeyDown = this.handleKeyDown.bind(this);
@@ -1892,10 +2020,11 @@
         this.chatWindow.classList.add('open');
       }
 
-      // Check if we need to show pre-chat form
+      // Check if we need to show the pre-chat gate (capture fields and/or
+      // a disclaimer that must be accepted before chatting)
       const needsForm =
-        this.config.captureFields &&
-        this.config.captureFields.length > 0 &&
+        ((this.config.captureFields && this.config.captureFields.length > 0) ||
+          (this.config.disclaimerEnabled && this.config.disclaimerText)) &&
         !this.storage.isSessionValid();
 
       if (needsForm) {
@@ -1962,7 +2091,9 @@
     }
 
     /**
-     * Show pre-chat form
+     * Show the pre-chat start gate — branded card with the org logo,
+     * optional capture fields, and an optional disclaimer the visitor
+     * must accept before the chat starts.
      */
     showPreChatForm() {
       const formOverlay = document.createElement('div');
@@ -1971,10 +2102,13 @@
 
       const fields = this.config.captureFields || [];
       const requiredFields = this.config.requiredFields || [];
+      const hasDisclaimer = !!(this.config.disclaimerEnabled && this.config.disclaimerText);
 
       let formHTML = `
-        <div class="horus-form-title">${escapeHTML(this.config.formTitle || "Let's connect!")}</div>
-        <div class="horus-form-subtitle">${escapeHTML(this.config.formSubtitle || "We'll respond immediately")}</div>
+        <div class="horus-gate">
+          ${this.config.logoUrl ? `<div class="horus-gate-logo"><img src="${escapeHTML(this.config.logoUrl)}" alt="" /></div>` : ''}
+          <div class="horus-form-title">${escapeHTML(this.config.formTitle || "Let's connect!")}</div>
+          <div class="horus-form-subtitle">${escapeHTML(this.config.formSubtitle || "We'll respond immediately")}</div>
       `;
 
       fields.forEach((field) => {
@@ -2000,10 +2134,21 @@
         `;
       });
 
+      if (hasDisclaimer) {
+        formHTML += `
+          <label class="horus-disclaimer">
+            <input type="checkbox" id="horus-disclaimer-check" />
+            <span class="horus-disclaimer-box"></span>
+            <span class="horus-disclaimer-text">${renderDisclaimer(this.config.disclaimerText)}</span>
+          </label>
+        `;
+      }
+
       formHTML += `
-        <button type="submit" class="horus-form-submit horus-focusable">
-          Start Chat
-        </button>
+          <button type="submit" class="horus-form-submit horus-focusable" ${hasDisclaimer ? 'disabled' : ''}>
+            Start Chat
+          </button>
+        </div>
       `;
 
       // Wrapped in a real <form> so the submit button and Enter key fire a
@@ -2012,14 +2157,23 @@
       formOverlay.innerHTML = `<form class="horus-form" novalidate>${formHTML}</form>`;
       this.chatWindow.appendChild(formOverlay);
 
+      // Disclaimer checkbox gates the Start button
+      const check = formOverlay.querySelector('#horus-disclaimer-check');
+      const submitBtn = formOverlay.querySelector('.horus-form-submit');
+      if (check && submitBtn) {
+        check.addEventListener('change', () => {
+          submitBtn.disabled = !check.checked;
+        });
+      }
+
       // Form submission
       formOverlay.addEventListener('submit', (e) => {
         e.preventDefault();
         this.handleFormSubmit(formOverlay);
       });
 
-      // Focus first input
-      const firstInput = formOverlay.querySelector('input');
+      // Focus first input (or the disclaimer checkbox when no fields)
+      const firstInput = formOverlay.querySelector('.horus-form-input') || check;
       if (firstInput) {
         setTimeout(() => firstInput.focus(), 100);
       }
@@ -2064,6 +2218,16 @@
       });
 
       if (!isValid) return;
+
+      // Record disclaimer consent — stamped on the conversation server-side
+      // as proof (accepted_at + disclaimer version hash)
+      if (this.config.disclaimerEnabled && this.config.disclaimerText) {
+        this.consentData = {
+          disclaimer_version: hashString(this.config.disclaimerText),
+          accepted_at: new Date().toISOString(),
+        };
+        this.storage.set('consent', this.consentData);
+      }
 
       // Store visitor data
       this.visitorData = formData;
@@ -2178,6 +2342,14 @@
         userAgent: navigator.userAgent,
         referrer: document.referrer,
       };
+      // Attach disclaimer consent proof (set when the pre-chat gate was
+      // accepted; lives exactly as long as the session)
+      if (this.consentData === null) {
+        this.consentData = this.storage.get('consent') || null;
+      }
+      if (this.consentData) {
+        metadata.consent = this.consentData;
+      }
 
       const result = await this.api.sendChat(
         this.sessionId,

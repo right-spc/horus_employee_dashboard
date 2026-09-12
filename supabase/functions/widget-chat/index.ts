@@ -341,18 +341,32 @@ Deno.serve(async (req: Request) => {
 
     // ── 5. CONVERSATION RESOLUTION ────────────
     // sessionId is the thread identifier for webchat
+    const upsertPayload: Record<string, unknown> = {
+      organization_id: organizationId,
+      contact_id: contactId,
+      channel: "webchat",
+      external_thread_id: sessionId,
+      customer_email: visitorEmail,
+      status: "active",
+      ai_enabled: true,
+    };
+
+    // Consent proof (pre-chat disclaimer acceptance) — written only when the
+    // widget sends it; absent keys leave existing values untouched on upsert.
+    const consent = (metadata as Record<string, unknown> | undefined)?.consent as
+      Record<string, unknown> | undefined;
+    if (consent?.accepted_at) {
+      const acceptedAt = new Date(String(consent.accepted_at));
+      if (!isNaN(acceptedAt.getTime())) {
+        upsertPayload.consent_accepted_at = acceptedAt.toISOString();
+        upsertPayload.consent_version = String(consent.disclaimer_version ?? "").slice(0, 64);
+      }
+    }
+
     const { data: conversation, error: convError } = await supabase
       .schema("messaging").from("conversations")
       .upsert(
-        {
-          organization_id: organizationId,
-          contact_id: contactId,
-          channel: "webchat",
-          external_thread_id: sessionId,
-          customer_email: visitorEmail,
-          status: "active",
-          ai_enabled: true,
-        },
+        upsertPayload,
         {
           onConflict: "organization_id,channel,external_thread_id",
           ignoreDuplicates: false,

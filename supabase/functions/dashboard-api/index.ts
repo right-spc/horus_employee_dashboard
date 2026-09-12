@@ -594,6 +594,13 @@
             updates.retention_days = days;
           }
 
+          // AI tone is a free-text description interpolated into the system prompt
+          if (typeof updates.ai_tone !== "undefined") {
+            const tone = String(updates.ai_tone || "").trim();
+            if (tone.length > 200) return err("ai_tone must be 200 characters or fewer", 400);
+            updates.ai_tone = tone || null;
+          }
+
           const { error } = await adminClient
             .schema("core").from("organizations")
             .update(updates)

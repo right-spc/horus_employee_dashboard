@@ -1878,13 +1878,11 @@ function renderKbPersonality(panel, org) {
       <div class="card-header"><div class="card-title">AI Tone</div></div>
       <div class="card-body">
         <div class="form-group">
-          <label>Response Tone</label>
-          <select id="s-tone" style="max-width:280px">
-            ${["professional","friendly","formal","casual"].map(t =>
-              `<option value="${t}" ${org.ai_tone===t?"selected":""}>${t.charAt(0).toUpperCase()+t.slice(1)}</option>`
-            ).join("")}
-          </select>
-          <div class="form-hint">The overall style of the AI's replies across all channels.</div>
+          <label>Response Tone <span class="hint">(describe how the AI should sound, max 200 chars)</span></label>
+          <input type="text" id="s-tone" maxlength="200" value="${escHtml(org.ai_tone || "professional")}"
+                 placeholder="e.g. friendly and casual, uses short sentences, no jargon"
+                 oninput="document.getElementById('s-tone-count').textContent = this.value.length + ' / 200'" />
+          <div class="form-hint"><span id="s-tone-count">${(org.ai_tone || "professional").length} / 200</span> · Applies to the AI's replies across all channels.</div>
         </div>
         <button class="btn btn-primary" onclick="saveAiTone()">Save Tone</button>
       </div>

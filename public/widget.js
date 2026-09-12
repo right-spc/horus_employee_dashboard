@@ -2786,8 +2786,14 @@
      * Trigger survey
      */
     triggerSurvey(reason) {
-  		if (this.storage.wasSurveyShown()) return;
   		if (this._surveyOpen) return;  // Prevent stacking if already open
+  		// Survey already taken (e.g. after the inactivity prompt) — don't ask
+  		// again, but STILL end the chat. Previously this returned early and the
+  		// End Chat button silently did nothing, so the session never cleared.
+  		if (this.storage.wasSurveyShown()) {
+  			this.endChatNow();
+  			return;
+  		}
 		
   		this.surveyReason = reason;
   		this._surveyOpen = true;
@@ -2949,13 +2955,25 @@
       }
 
       // Clear session and close widget
+      this.endChatNow(submitted ? 2000 : 0);
+    }
+
+    /**
+     * End the chat session: wipe local state (session, messages, visitor
+     * data, consent) and close the widget. Next open starts fresh — the
+     * pre-chat gate shows again if configured.
+     */
+    endChatNow(delay = 0) {
       setTimeout(() => {
         this.storage.clear();
         this.close();
         this.sessionId = null;
         this.messages = [];
         this.visitorData = {};
-      }, submitted ? 2000 : 0);
+        this.consentData = null;
+        this.lastEscalated = false;
+        this.pendingMessage = null;
+      }, delay);
     }
 
     /**

@@ -710,6 +710,7 @@
         bottom: 96px;
         width: 380px;
         height: min(650px, calc(100vh - 120px));
+        min-height: 200px;
         background: var(--horus-bg);
         border-radius: 12px;
         box-shadow: 0 8px 32px rgba(0,0,0,0.2);

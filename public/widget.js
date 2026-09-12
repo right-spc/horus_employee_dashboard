@@ -1747,10 +1747,45 @@
         }
 
         // Update config
+        const prevLogo = this.config?.logoUrl ?? null;
         this.config = this.mergeConfig(result.data, window.horusDesk || {});
         this.storage.setConfig(result.data);
         this.updateStyles();
+        // Logo uploaded/removed while the page is open — swap branding live
+        if ((this.config?.logoUrl ?? null) !== prevLogo) {
+          this.updateBranding();
+        }
       }
+    }
+
+    /**
+     * Re-apply logo/robot branding in place (logo changed via config refresh)
+     */
+    updateBranding() {
+      if (!this.shadowRoot) return;
+      // Header: first node inside the title is the branding element
+      const title = this.shadowRoot.querySelector('.horus-header-title');
+      if (title) {
+        const brand = title.querySelector('.horus-logo-wrap') || title.querySelector(':scope > svg');
+        const tmp = document.createElement('span');
+        tmp.innerHTML = this.config.logoUrl
+          ? `<span class="horus-logo-wrap"><img class="horus-avatar-img" src="${escapeHTML(this.config.logoUrl)}" alt="" /></span>`
+          : ICONS.robot;
+        const node = tmp.firstElementChild;
+        if (brand) brand.replaceWith(node); else title.prepend(node);
+      }
+      // Gate logo (if the start screen is open)
+      const gateLogo = this.shadowRoot.querySelector('.horus-gate-logo');
+      if (gateLogo) {
+        gateLogo.innerHTML = this.config.logoUrl
+          ? `<img class="horus-avatar-img" src="${escapeHTML(this.config.logoUrl)}" alt="" />`
+          : `<span class="horus-gate-logo-fallback">${ICONS.robot}</span>`;
+      }
+      // AI avatars (messages, typing indicator, stream bubble)
+      this.shadowRoot.querySelectorAll('.horus-message-avatar').forEach((av) => {
+        av.innerHTML = this.aiAvatar();
+      });
+      this.bindImgFallback(this.shadowRoot);
     }
 
     /**

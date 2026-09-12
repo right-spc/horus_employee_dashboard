@@ -2459,7 +2459,7 @@ function renderSettingsTab(el, org) {
           <div class="logo-preview">
             ${org.logo_url
               ? `<img src="${escHtml(org.logo_url)}" alt="Logo" />`
-              : `<span>${escHtml((org.name || "?").charAt(0).toUpperCase())}</span>`}
+              : `<svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"></rect><circle cx="12" cy="5" r="2"></circle><path d="M12 7v4"></path><line x1="8" y1="16" x2="8" y2="16"></line><line x1="16" y1="16" x2="16" y2="16"></line></svg>`}
           </div>
           <div>
             <div class="hint mb-2">Shown in the chat widget header and as the AI's avatar. A square image works best — any common format, automatically resized to 256px.</div>

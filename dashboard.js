@@ -1502,7 +1502,7 @@ function updateWidgetPreview() {
 // dashboard-api test_chat → widget-chat test mode: the real AI pipeline runs,
 // but nothing is persisted and no credits/usage are consumed.
 
-let _testChat = { history: [], sending: false };
+let _testChat = { history: [], sending: false, live: "" };
 
 const TCHAT_ICONS = {
   chat: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="24" height="24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`,
@@ -1515,7 +1515,7 @@ const TCHAT_ICONS = {
 function maybeMountTestChat(widget, kbDocs) {
   document.getElementById("tchat-root")?.remove();
   if (!kbDocs || !kbDocs.length) return;
-  _testChat = { history: [], sending: false };
+  _testChat = { history: [], sending: false, live: "" };
   const root = document.createElement("div");
   root.id = "tchat-root";
   const c = widget?.colors?.light || {};
@@ -1577,7 +1577,11 @@ function renderTestChatMessages() {
     }
   }
   if (_testChat.sending) {
-    html += `<div class="tchat-msg ai"><div class="tchat-avatar">${TCHAT_ICONS.avatar}</div><div class="tchat-bubble tchat-typing"><span></span><span></span><span></span></div></div>`;
+    if (_testChat.live) {
+      html += `<div class="tchat-msg ai"><div class="tchat-avatar">${TCHAT_ICONS.avatar}</div><div class="tchat-bubble" id="tchat-live">${escHtml(_testChat.live)}</div></div>`;
+    } else {
+      html += `<div class="tchat-msg ai"><div class="tchat-avatar">${TCHAT_ICONS.avatar}</div><div class="tchat-bubble tchat-typing"><span></span><span></span><span></span></div></div>`;
+    }
   }
   box.innerHTML = html;
   box.scrollTop = box.scrollHeight;
@@ -1588,20 +1592,75 @@ async function sendTestChat() {
   const text = (input?.value || "").trim();
   if (!text || _testChat.sending) return;
   _testChat.sending = true;
+  _testChat.live = "";
   input.value = "";
   _testChat.history.push({ role: "user", content: text });
   renderTestChatMessages();
   try {
-    const resp = await api("test_chat", {
-      org_id: currentOrgId,
-      message: text,
-      history: _testChat.history.slice(0, -1),
+    // Streaming mode: dashboard-api pipes widget-chat's SSE straight through.
+    // Events: {type:"delta",text} as the reply generates, then one terminal
+    // {type:"done",message,escalated,…} with routing metadata.
+    const { data: { session } } = await _supabase.auth.getSession();
+    if (!session) throw new Error("Not authenticated");
+    const res = await fetch(`${CONFIG.supabaseUrl}/functions/v1/dashboard-api`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        action: "test_chat",
+        org_id: currentOrgId,
+        message: text,
+        history: _testChat.history.slice(0, -1),
+        stream: true,
+      }),
     });
-    _testChat.history.push({ role: "assistant", content: resp.message, escalated: resp.escalated, escalation_type: resp.escalation_type });
+    if (!res.ok || !res.body) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error || res.statusText);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let lineBuf = "";
+    let donePayload = null;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      lineBuf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = lineBuf.indexOf("\n")) >= 0) {
+        const line = lineBuf.slice(0, nl).trim();
+        lineBuf = lineBuf.slice(nl + 1);
+        if (!line.startsWith("data:")) continue;
+        let evt;
+        try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
+        if (evt.type === "delta" && evt.text) {
+          const first = !_testChat.live;
+          _testChat.live += evt.text;
+          if (first) {
+            renderTestChatMessages(); // swap typing dots for the live bubble
+          } else {
+            const el = document.getElementById("tchat-live");
+            if (el) el.textContent = _testChat.live;
+          }
+          const box = document.getElementById("tchat-messages");
+          if (box) box.scrollTop = box.scrollHeight;
+        } else if (evt.type === "done") {
+          donePayload = evt;
+        } else if (evt.type === "error") {
+          throw new Error(evt.error || "Stream failed");
+        }
+      }
+    }
+    if (!donePayload) throw new Error("Stream ended unexpectedly");
+    _testChat.history.push({ role: "assistant", content: donePayload.message || _testChat.live, escalated: donePayload.escalated, escalation_type: donePayload.escalation_type });
   } catch (e) {
     _testChat.history.push({ role: "assistant", content: `⚠ ${e.message}` });
   }
   _testChat.sending = false;
+  _testChat.live = "";
   renderTestChatMessages();
 }
 

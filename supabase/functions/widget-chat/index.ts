@@ -1009,6 +1009,12 @@ async function handleTestChat(
     { role: "user", content: message },
   ];
 
+  // Streaming variant (body.stream === true): SSE reply instead of buffered
+  // JSON. Same pipeline and guarantees — see streamTestChatResponse.
+  if (body.stream === true) {
+    return streamTestChatResponse(kimiMessages);
+  }
+
   const kimiT0 = Date.now();
   const kimiResponse = await callKimiWithRetry({
     model: KIMI_MODEL,
@@ -1056,6 +1062,173 @@ async function handleTestChat(
       completion_tokens: kimiResponse.usage?.completion_tokens ?? null,
     },
   }, 200, "*");
+}
+
+// Incrementally extracts the string value of "response_text" from a streaming
+// JSON document (tool-call arguments arrive in small fragments). response_text
+// is the first property of submit_response, so scanning for the key is safe.
+// Decodes JSON escapes; holds back incomplete escape sequences at chunk edges.
+class ResponseTextExtractor {
+  private buf = "";
+  private started = false;
+  private closed = false;
+
+  push(chunk: string): string {
+    if (this.closed) return "";
+    this.buf += chunk;
+    if (!this.started) {
+      const m = /"response_text"\s*:\s*"/.exec(this.buf);
+      if (!m) {
+        if (this.buf.length > 4096) this.buf = this.buf.slice(-256);
+        return "";
+      }
+      this.buf = this.buf.slice(m.index + m[0].length);
+      this.started = true;
+    }
+    let out = "";
+    let i = 0;
+    for (; i < this.buf.length; i++) {
+      const c = this.buf[i];
+      if (c === "\\") {
+        const n = this.buf[i + 1];
+        if (n === undefined) break; // incomplete escape — wait for more
+        if (n === "u") {
+          if (i + 6 > this.buf.length) break; // \uXXXX incomplete
+          out += String.fromCharCode(parseInt(this.buf.slice(i + 2, i + 6), 16));
+          i += 5;
+          continue;
+        }
+        const map: Record<string, string> = { '"': '"', "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" };
+        if (!(n in map)) break;
+        out += map[n];
+        i += 1; // consume the escaped char too (loop i++ moves past it)
+        continue;
+      }
+      if (c === '"') { this.closed = true; i++; break; }
+      out += c;
+    }
+    this.buf = this.buf.slice(i);
+    return out;
+  }
+}
+
+// Streaming test chat: calls Kimi with stream:true and forwards the visible
+// reply text (extracted from the submit_response tool-call arguments as they
+// arrive) as Server-Sent Events: {type:"delta",text}… then one terminal
+// {type:"done",message,escalated,…,debug} with routing + token usage.
+// Nothing persisted, no usage consumed — same guarantees as buffered mode.
+async function streamTestChatResponse(kimiMessages: Array<Record<string, unknown>>): Promise<Response> {
+  const kimiT0 = Date.now();
+  let upstream: ReadableStream<Uint8Array>;
+  try {
+    upstream = await callKimiStream({
+      model: KIMI_MODEL,
+      max_tokens: 2000,
+      reasoning_effort: REASONING_EFFORT,
+      messages: kimiMessages,
+      tools: [SUBMIT_RESPONSE_TOOL],
+      tool_choice: "required",
+      stream: true,
+      stream_options: { include_usage: true },
+    });
+  } catch (e) {
+    return errorResponse(`AI upstream error: ${(e as Error)?.message ?? e}`, 502, "*");
+  }
+
+  const encoder = new TextEncoder();
+  const extractor = new ResponseTextExtractor();
+  let fullArgs = "";
+  let fullContent = "";
+  let usage: Record<string, any> | null = null;
+  let ttftMs: number | null = null;
+
+  const body = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (obj: unknown) => controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
+      try {
+        const reader = upstream.getReader();
+        const decoder = new TextDecoder();
+        let lineBuf = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          lineBuf += decoder.decode(value, { stream: true });
+          let nl: number;
+          while ((nl = lineBuf.indexOf("\n")) >= 0) {
+            const line = lineBuf.slice(0, nl).trim();
+            lineBuf = lineBuf.slice(nl + 1);
+            if (!line.startsWith("data:")) continue;
+            const data = line.slice(5).trim();
+            if (!data || data === "[DONE]") continue;
+            let chunk: any;
+            try { chunk = JSON.parse(data); } catch { continue; }
+            if (chunk.usage) usage = chunk.usage;
+            const delta = chunk.choices?.[0]?.delta;
+            if (!delta) continue;
+            const toolCalls = delta.tool_calls;
+            if (Array.isArray(toolCalls)) {
+              for (const tc of toolCalls) {
+                const args = tc?.function?.arguments;
+                if (typeof args !== "string") continue;
+                fullArgs += args;
+                const piece = extractor.push(args);
+                if (piece) {
+                  if (ttftMs === null) ttftMs = Date.now() - kimiT0;
+                  send({ type: "delta", text: piece });
+                }
+              }
+            } else if (typeof delta.content === "string" && delta.content) {
+              // Fallback: model answered in plain content instead of the tool
+              fullContent += delta.content;
+              if (ttftMs === null) ttftMs = Date.now() - kimiT0;
+              send({ type: "delta", text: delta.content });
+            }
+          }
+        }
+
+        // Final routing parse — identical to the buffered path
+        const parsed: RouteParseResult = fullArgs
+          ? parseSubmitResponse(parseToolArguments(fullArgs))
+          : parseClaudeResponse(fullContent);
+        if (!parsed.response_text?.trim()) {
+          parsed.response_text = "I've looked into that for you. Could you tell me a bit more about what you need so I can help further?";
+          parsed.confidence = 0.50;
+        }
+        const responseText = parsed.code === "IGNORE"
+          ? (parsed.response_text || "I'm not sure I understood that. Could you rephrase?")
+          : parsed.response_text;
+
+        send({
+          type: "done",
+          message: responseText,
+          escalated: parsed.code === "ESCALATE",
+          confidence: parsed.confidence,
+          escalation_type: parsed.escalation_type,
+          lead_priority: parsed.lead_priority,
+          debug: {
+            kimi_ms: Date.now() - kimiT0,
+            ttft_ms: ttftMs,
+            prompt_tokens: usage?.prompt_tokens ?? null,
+            cached_tokens: usage?.prompt_tokens_details?.cached_tokens ?? null,
+            completion_tokens: usage?.completion_tokens ?? null,
+          },
+        });
+      } catch (e) {
+        send({ type: "error", error: String((e as Error)?.message ?? e) });
+      }
+      controller.close();
+    },
+  });
+
+  return new Response(body, {
+    status: 200,
+    headers: {
+      ...CORS_HEADERS,
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
 }
 
 interface RouteParseResult {
@@ -2388,6 +2561,44 @@ async function callKimiWithRetry(params: Record<string, unknown>): Promise<any> 
         status === 502 || status === 503 || status === 504;
       if (!retryable || attempt === 2) throw err;
       console.warn(`Kimi call failed with ${status ?? "network error"}, retrying in ${delays[attempt]}ms (attempt ${attempt + 1}/3)`);
+      await new Promise((r) => setTimeout(r, delays[attempt]));
+    }
+  }
+  throw lastError;
+}
+
+// Streaming variant of callKimiWithRetry — same retry policy, but only until
+// response headers arrive; once the SSE stream starts it cannot be retried.
+// Returns the raw response body stream for the caller to parse.
+async function callKimiStream(params: Record<string, unknown>): Promise<ReadableStream<Uint8Array>> {
+  const delays = [500, 1500];
+  let lastError: any;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(KIMI_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${Deno.env.get("TELNYX_API_KEY")}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(params),
+      });
+      if (!res.ok) {
+        const status = res.status;
+        const errBody = await res.text();
+        const err: any = new Error(`Telnyx ${status}: ${errBody.slice(0, 300)}`);
+        err.status = status;
+        throw err;
+      }
+      if (!res.body) throw new Error("Telnyx returned no stream body");
+      return res.body;
+    } catch (err: any) {
+      lastError = err;
+      const status = err?.status;
+      const retryable = status === undefined || status === 429 || status === 500 ||
+        status === 502 || status === 503 || status === 504;
+      if (!retryable || attempt === 2) throw err;
+      console.warn(`Kimi stream failed with ${status ?? "network error"}, retrying in ${delays[attempt]}ms (attempt ${attempt + 1}/3)`);
       await new Promise((r) => setTimeout(r, delays[attempt]));
     }
   }

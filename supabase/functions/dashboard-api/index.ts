@@ -399,8 +399,8 @@
         // pipeline runs (org config, KB, prompt, Kimi) but nothing persists and
         // no usage/credits are consumed. History is client-supplied, bounded.
         case "test_chat": {
-          const { org_id, message, history } = body as {
-            org_id: string; message: string; history?: Array<{ role: string; content: string }>;
+          const { org_id, message, history, stream } = body as {
+            org_id: string; message: string; history?: Array<{ role: string; content: string }>; stream?: boolean;
           };
           if (!org_id || !String(message || "").trim()) {
             return err("Missing org_id or message", 400);
@@ -418,8 +418,21 @@
               org_id,
               message: String(message).slice(0, 2000),
               history: Array.isArray(history) ? history.slice(-20) : [],
+              ...(stream === true ? { stream: true } : {}),
             }),
           });
+          // Streaming mode: pipe widget-chat's SSE body straight through to the
+          // browser unchanged (delta/done events — see widget-chat).
+          if (stream === true) {
+            if (!res.ok || !res.body) {
+              const payload = await res.json().catch(() => ({}));
+              return err(payload.error || "Test chat failed", res.status);
+            }
+            return new Response(res.body, {
+              status: 200,
+              headers: { ...CORS_HEADERS, "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
+            });
+          }
           const payload = await res.json().catch(() => ({}));
           if (!res.ok) return err(payload.error || "Test chat failed", res.status);
           return ok(payload);

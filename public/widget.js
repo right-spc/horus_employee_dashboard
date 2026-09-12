@@ -2124,6 +2124,9 @@
      * must accept before the chat starts.
      */
     showPreChatForm() {
+      // Defensive: a previous unsubmitted gate may still be in the DOM
+      this.chatWindow.querySelector('#horus-prechat-form')?.remove();
+
       const formOverlay = document.createElement('div');
       formOverlay.className = 'horus-form-overlay';
       formOverlay.id = 'horus-prechat-form';
@@ -2973,6 +2976,10 @@
         this.consentData = null;
         this.lastEscalated = false;
         this.pendingMessage = null;
+        // Clear the rendered bubbles too — reopening through the pre-chat
+        // gate leaves the old DOM behind the overlay, which looked like the
+        // session continued until a page refresh rebuilt the widget.
+        if (this.messagesArea) this.messagesArea.innerHTML = '';
       }, delay);
     }
 

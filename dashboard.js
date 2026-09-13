@@ -1136,10 +1136,12 @@ function renderChannelsTab(el, org, providers, widget) {
     <div class="tabs" style="margin-bottom:16px">
       <button class="tab ${currentChannel === "webchat" ? "active" : ""}" onclick="switchChannel('webchat')">Website Chat</button>
       ${!currentIsDemo ? `<button class="tab ${currentChannel === "email" ? "active" : ""}" onclick="switchChannel('email')">Email</button>` : ""}
+      ${!currentIsDemo ? `<button class="tab ${currentChannel === "voice" ? "active" : ""}" onclick="switchChannel('voice')">Voice</button>` : ""}
     </div>
     <div id="channel-panel"></div>`;
   const panel = document.getElementById("channel-panel");
-  if (currentChannel === "email" && !currentIsDemo) renderEmailTab(panel, org, providers);
+  if (currentChannel === "voice" && !currentIsDemo) renderVoiceTab(panel, org);
+  else if (currentChannel === "email" && !currentIsDemo) renderEmailTab(panel, org, providers);
   else renderWidgetTab(panel, widget, org);
 }
 
@@ -1245,6 +1247,412 @@ function openAuthLink() {
   if (window._authLink) {
     window.open(window._authLink, "_blank");
   }
+}
+
+// ── Voice Tab (UI SHELL — backend wiring comes with the voice channel build) ──
+// Everything here runs on session-local mock state (_voiceMock) so the design
+// can be reviewed end-to-end. Saves and provisioning are preview-only and
+// reset on reload. See docs/voice-channel-plan.md Phase 2.
+
+// Placeholder voice shortlist — display names/personalities are ours; the IDs
+// get mapped to the real Telnyx TTS catalog at wiring time.
+const VOICE_OPTIONS = [
+  { id: "sofia",   name: "Sofia",   desc: "Warm, friendly female" },
+  { id: "aria",    name: "Aria",    desc: "Bright, upbeat female" },
+  { id: "nora",    name: "Nora",    desc: "Calm, professional female" },
+  { id: "marcus",  name: "Marcus",  desc: "Deep, reassuring male" },
+  { id: "elliott", name: "Elliott", desc: "Neutral, articulate male" },
+  { id: "dex",     name: "Dex",     desc: "Energetic, casual male" },
+];
+
+let _voiceMock = null; // per-org mock state, built by voiceMockState()
+
+function voiceMockState(orgId) {
+  if (_voiceMock && _voiceMock.orgId === orgId) return _voiceMock;
+  _voiceMock = {
+    orgId,
+    number: null,              // null = no number provisioned yet
+    enabled: false,
+    voice: "sofia",
+    greeting: "Thank you for calling! How can I help you today?",
+    transferEnabled: false,
+    transferNumber: "",
+    fallbackMode: "voicemail", // forward | voicemail
+    fallbackNumber: "",
+    voicemailGreeting: "Sorry, we're unable to take your call right now. Please leave a message after the tone.",
+    afterHours: "fallback",    // answer | fallback
+  };
+  return _voiceMock;
+}
+
+function voicePreviewToast() {
+  toast("UI preview — the voice backend isn't wired yet, nothing was saved.", "default");
+}
+
+function renderVoiceTab(el, org) {
+  const v = voiceMockState(org.id);
+
+  const syncBadge = v.number
+    ? `<span class="badge badge-yellow">Not connected</span>`
+    : `<span class="badge badge-gray">No number</span>`;
+
+  el.innerHTML = `
+    <div class="card mb-4">
+      <div class="card-body" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+        <div>
+          <div class="toggle-label">Voice AI Receptionist</div>
+          <div class="toggle-desc">
+            <span class="badge ${v.enabled ? "badge-green" : "badge-gray"}">${v.enabled ? "Enabled" : "Disabled"}</span>
+            · Assistant: ${syncBadge}
+            · <strong>0</strong> min this cycle (<a href="#" onclick="event.preventDefault();switchTab('payments')" style="color:var(--primary)">Billing</a>)
+          </div>
+        </div>
+        <span class="badge badge-blue" style="margin-left:auto">UI preview</span>
+      </div>
+    </div>
+
+    <div class="card mb-4">
+      <div class="card-header"><div class="card-title">Phone Number</div></div>
+      <div class="card-body">
+        ${v.number ? `
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px">
+            <div style="font-size:20px;font-weight:700;letter-spacing:0.5px">${escHtml(v.number)}</div>
+            <button class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText('${v.number}');toast('Copied','success')">Copy</button>
+            <span class="badge badge-green">Voice</span>
+            <span class="badge badge-gray">SMS</span>
+          </div>
+          <p class="text-muted" style="font-size:13px;margin-bottom:12px">
+            Customers call this number to reach the AI receptionist. Included in the voice package.
+          </p>
+          <button class="btn btn-danger" onclick="voiceReleaseNumber()">Release Number</button>
+        ` : `
+          <p class="text-muted" style="margin-bottom:16px">
+            Get a real US phone number for this account. When customers call, the AI receptionist answers,
+            responds from the knowledge base, and can book appointments. Included in the voice package — no per-number fees.
+          </p>
+          <button class="btn btn-primary" onclick="showVoiceNumberModal()">${ICONS.plus} Get a Phone Number</button>
+        `}
+      </div>
+    </div>
+
+    <div class="card mb-4">
+      <div class="card-header"><div class="card-title">AI Receptionist</div></div>
+      <div class="card-body">
+        <div class="toggle-row" style="border-bottom:none;padding-bottom:0">
+          <div>
+            <div class="toggle-label">Answer Calls with AI</div>
+            <div class="toggle-desc">When off, calls go straight to the fallback below</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="v-enabled" ${v.enabled ? "checked" : ""} onchange="voiceMockField('enabled', this.checked)">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+
+        <div class="form-group" style="margin-top:16px">
+          <label>Voice</label>
+          <div id="v-voice-list">
+            ${VOICE_OPTIONS.map(o => `
+              <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border:1px solid ${v.voice === o.id ? "var(--primary)" : "var(--border)"};border-radius:8px;margin-bottom:6px;cursor:pointer;${v.voice === o.id ? "background:rgba(59,130,246,0.08)" : ""}"
+                   onclick="voiceMockField('voice','${o.id}')">
+                <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();previewVoice('${o.id}')" title="Preview">▶</button>
+                <div style="flex:1">
+                  <div style="font-weight:600;font-size:14px">${o.name}</div>
+                  <div class="text-muted" style="font-size:12px">${o.desc}</div>
+                </div>
+                ${v.voice === o.id ? `<span class="badge badge-blue">Selected</span>` : ""}
+              </div>`).join("")}
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>Greeting <span class="hint">(the first thing callers hear)</span></label>
+          <textarea id="v-greeting" rows="2" maxlength="300"
+            oninput="document.getElementById('v-greeting-count').textContent = this.value.length + ' / 300'">${escHtml(v.greeting)}</textarea>
+          <div class="form-hint"><span id="v-greeting-count">${v.greeting.length} / 300</span></div>
+        </div>
+        <button class="btn btn-primary" onclick="voiceSaveReceptionist()">Save Receptionist Settings</button>
+      </div>
+    </div>
+
+    <div class="card mb-4">
+      <div class="card-header"><div class="card-title">Escalation &amp; Fallback</div></div>
+      <div class="card-body">
+        <div class="toggle-row" style="border-bottom:none;padding-bottom:0">
+          <div>
+            <div class="toggle-label">Warm Transfer</div>
+            <div class="toggle-desc">The AI can offer to transfer the caller to a human. If nobody picks up, the AI takes the call back and takes a message.</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="v-transfer-enabled" ${v.transferEnabled ? "checked" : ""} onchange="voiceMockField('transferEnabled', this.checked)">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="form-group" id="v-transfer-number-wrap" style="max-width:320px;display:${v.transferEnabled ? "" : "none"}">
+          <label>Transfer To</label>
+          <input type="tel" id="v-transfer-number" value="${escHtml(v.transferNumber)}" placeholder="+1 (555) 123-4567" />
+        </div>
+
+        <div class="form-group" style="margin-top:18px">
+          <label>When voice is off, credits run out, or it's after hours</label>
+          <div class="flex-row" style="gap:8px;flex-wrap:wrap">
+            <button class="btn ${v.fallbackMode === "voicemail" ? "btn-primary" : "btn-secondary"} btn-sm" id="v-fb-voicemail" onclick="voiceMockField('fallbackMode','voicemail')">Take Voicemail</button>
+            <button class="btn ${v.fallbackMode === "forward" ? "btn-primary" : "btn-secondary"} btn-sm" id="v-fb-forward" onclick="voiceMockField('fallbackMode','forward')">Forward Calls</button>
+          </div>
+        </div>
+        <div class="form-group" id="v-fb-voicemail-wrap" style="display:${v.fallbackMode === "voicemail" ? "" : "none"}">
+          <label>Voicemail Greeting <span class="hint">(spoken in the account's voice, then the caller can leave a message)</span></label>
+          <textarea id="v-voicemail-greeting" rows="2" maxlength="300">${escHtml(v.voicemailGreeting)}</textarea>
+        </div>
+        <div class="form-group" id="v-fb-forward-wrap" style="max-width:320px;display:${v.fallbackMode === "forward" ? "" : "none"}">
+          <label>Forward To</label>
+          <input type="tel" id="v-fallback-number" value="${escHtml(v.fallbackNumber)}" placeholder="+1 (555) 123-4567" />
+          <div class="form-hint">Calls ring straight through — the AI never picks up.</div>
+        </div>
+
+        <div class="form-group" style="margin-top:6px">
+          <label>After hours <span class="hint">(uses the working hours from KB → Business Details)</span></label>
+          <div class="flex-row" style="gap:8px;flex-wrap:wrap">
+            <button class="btn ${v.afterHours === "answer" ? "btn-primary" : "btn-secondary"} btn-sm" id="v-ah-answer" onclick="voiceMockField('afterHours','answer')">Answer Anyway</button>
+            <button class="btn ${v.afterHours === "fallback" ? "btn-primary" : "btn-secondary"} btn-sm" id="v-ah-fallback" onclick="voiceMockField('afterHours','fallback')">Use Fallback</button>
+          </div>
+        </div>
+        <button class="btn btn-primary" onclick="voiceSaveEscalation()">Save Escalation &amp; Fallback</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><div class="card-title">Usage This Cycle</div></div>
+      <div class="card-body">
+        <div class="stat-grid">
+          <div class="stat-card">
+            <div class="stat-label">Calls Answered</div>
+            <div class="stat-value">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Total Minutes</div>
+            <div class="stat-value">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Avg Duration</div>
+            <div class="stat-value">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Credits Burned</div>
+            <div class="stat-value">0</div>
+          </div>
+        </div>
+        <p class="text-muted" style="font-size:12px;margin-top:12px">
+          Aggregates only — caller numbers, recordings and transcripts belong to the customer and are never shown here.
+        </p>
+      </div>
+    </div>`;
+}
+
+function voiceMockField(key, value) {
+  _voiceMock[key] = value;
+  if (key === "enabled" || key === "voice") {
+    renderVoiceTab(document.getElementById("channel-panel"), window._orgData.org);
+    return;
+  }
+  if (key === "transferEnabled") {
+    document.getElementById("v-transfer-number-wrap").style.display = value ? "" : "none";
+    return;
+  }
+  if (key === "fallbackMode") {
+    for (const m of ["voicemail", "forward"]) {
+      document.getElementById(`v-fb-${m}`).className = `btn ${m === value ? "btn-primary" : "btn-secondary"} btn-sm`;
+    }
+    document.getElementById("v-fb-voicemail-wrap").style.display = value === "voicemail" ? "" : "none";
+    document.getElementById("v-fb-forward-wrap").style.display = value === "forward" ? "" : "none";
+    return;
+  }
+  if (key === "afterHours") {
+    for (const m of ["answer", "fallback"]) {
+      document.getElementById(`v-ah-${m}`).className = `btn ${m === value ? "btn-primary" : "btn-secondary"} btn-sm`;
+    }
+  }
+}
+
+function voiceSaveReceptionist() {
+  _voiceMock.greeting = document.getElementById("v-greeting").value.trim();
+  voicePreviewToast();
+}
+
+function voiceSaveEscalation() {
+  _voiceMock.transferNumber = document.getElementById("v-transfer-number").value.trim();
+  _voiceMock.fallbackNumber = document.getElementById("v-fallback-number").value.trim();
+  _voiceMock.voicemailGreeting = document.getElementById("v-voicemail-greeting").value.trim();
+  voicePreviewToast();
+}
+
+function voiceReleaseNumber() {
+  if (!confirm(`Release ${_voiceMock.number}?\n\nThis gives the number back and it may not be recoverable.`)) return;
+  const typed = prompt(`To confirm, type the number exactly:\n\n${_voiceMock.number}`);
+  if (typed === null) return;
+  if (typed.replace(/\D/g, "") !== _voiceMock.number.replace(/\D/g, "")) {
+    toast("Number didn't match — release cancelled", "error");
+    return;
+  }
+  _voiceMock.number = null;
+  _voiceMock.enabled = false;
+  renderVoiceTab(document.getElementById("channel-panel"), window._orgData.org);
+  voicePreviewToast();
+}
+
+// Speaks a sample line with the browser's built-in TTS so the preview
+// interaction works without the Telnyx backend. Actual voice quality/character
+// comes from the Telnyx catalog at wiring time.
+function previewVoice(voiceId) {
+  const orgName = window._orgData?.org?.name || "our business";
+  const sample = `Thank you for calling ${orgName}. How can I help you today?`;
+  if (!("speechSynthesis" in window)) {
+    toast("Voice previews aren't supported in this browser", "error");
+    return;
+  }
+  window.speechSynthesis.cancel();
+  const utter = new SpeechSynthesisUtterance(sample);
+  const voices = window.speechSynthesis.getVoices();
+  // crude mapping so each option at least sounds a little different
+  const idx = VOICE_OPTIONS.findIndex(o => o.id === voiceId);
+  const english = voices.filter(v => v.lang && v.lang.startsWith("en"));
+  if (english.length > 0 && idx >= 0) utter.voice = english[idx % english.length];
+  utter.rate = 1;
+  window.speechSynthesis.speak(utter);
+}
+
+// ── Number provisioning modal (Softphone-style, mock search) ─────────────────
+
+let _vnumSearch = { areaCode: "", results: [], selected: null, timer: null };
+
+function showVoiceNumberModal() {
+  _vnumSearch = { areaCode: "", results: [], selected: null, timer: null };
+  const modal = document.createElement("div");
+  modal.className = "modal-backdrop";
+  modal.id = "voice-number-modal";
+  modal.innerHTML = `
+    <div class="modal" style="max-width:640px">
+      <div class="modal-header">
+        <div class="modal-title">Get a Phone Number</div>
+        <button class="btn btn-ghost btn-sm" onclick="this.closest('.modal-backdrop').remove()">✕</button>
+      </div>
+      <div class="modal-body" id="vnum-body"></div>
+    </div>`;
+  document.body.appendChild(modal);
+  voiceNumberShowSearch();
+}
+
+function voiceNumberShowSearch() {
+  const body = document.getElementById("vnum-body");
+  if (!body) return;
+  body.innerHTML = `
+    <div class="form-group" style="max-width:220px">
+      <label>Area Code <span class="hint">(US numbers)</span></label>
+      <input type="text" id="vnum-area" maxlength="3" inputmode="numeric" placeholder="e.g. 415"
+        value="${_vnumSearch.areaCode}"
+        oninput="voiceNumberSearchInput(this)" />
+    </div>
+    <div id="vnum-results"></div>`;
+  if (_vnumSearch.results.length > 0) {
+    voiceNumberRenderResults();
+  } else {
+    document.getElementById("vnum-results").innerHTML = `<p class="text-muted" style="font-size:13px">Enter an area code to see available numbers.</p>`;
+  }
+  document.getElementById("vnum-area").focus();
+}
+
+function voiceNumberSearchInput(input) {
+  input.value = input.value.replace(/\D/g, "").slice(0, 3);
+  _vnumSearch.areaCode = input.value;
+  _vnumSearch.selected = null;
+  clearTimeout(_vnumSearch.timer);
+  _vnumSearch.timer = setTimeout(() => voiceNumberSearch(), 400);
+}
+
+// Mock availability search — replaced by dashboard-api → Telnyx at wiring time.
+function voiceNumberSearch() {
+  const resultsEl = document.getElementById("vnum-results");
+  if (!resultsEl) return;
+  const area = _vnumSearch.areaCode;
+  if (area.length !== 3) {
+    resultsEl.innerHTML = `<p class="text-muted" style="font-size:13px">Enter an area code to see available numbers.</p>`;
+    return;
+  }
+  _vnumSearch.results = Array.from({ length: 6 }, (_, i) => {
+    const suffix = String(100 + Math.floor(Math.random() * 899));
+    return {
+      e164: `+1${area}555${String(i + 1).padStart(2, "0")}${suffix.slice(0, 2)}`,
+      display: `+1 (${area}) 555-01${i}${suffix[0]}`,
+      city: ["Springfield", "Riverton", "Lakeside", "Fairview", "Georgetown", "Madison"][i],
+      region: "US",
+      capabilities: i % 3 === 2 ? ["Voice"] : ["Voice", "SMS"],
+    };
+  });
+  voiceNumberRenderResults();
+}
+
+function voiceNumberRenderResults() {
+  const resultsEl = document.getElementById("vnum-results");
+  if (!resultsEl) return;
+  if (_vnumSearch.results.length === 0) {
+    resultsEl.innerHTML = `<p class="text-muted" style="font-size:13px">No numbers available for this area code — try another.</p>`;
+    return;
+  }
+  resultsEl.innerHTML = `
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th></th><th>Number</th><th>City</th><th>Capabilities</th></tr></thead>
+        <tbody>
+          ${_vnumSearch.results.map((n, i) => `
+            <tr style="cursor:pointer;${_vnumSearch.selected === n.e164 ? "background:rgba(59,130,246,0.08)" : ""}" onclick="voiceNumberSelect('${n.e164}')">
+              <td style="width:32px"><input type="radio" name="vnum-pick" ${_vnumSearch.selected === n.e164 ? "checked" : ""} style="width:auto;pointer-events:none" /></td>
+              <td class="font-semibold">${escHtml(n.display)}</td>
+              <td class="text-sm text-muted">${escHtml(n.city)}, ${escHtml(n.region)}</td>
+              <td>${n.capabilities.map(c => `<span class="badge ${c === "Voice" ? "badge-green" : "badge-gray"}" style="margin-right:4px">${c}</span>`).join("")}</td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>
+    <div class="flex-row" style="margin-top:14px;justify-content:flex-end">
+      <button class="btn btn-primary" ${_vnumSearch.selected ? "" : "disabled"} onclick="voiceNumberConfirm()">
+        Get This Number
+      </button>
+    </div>`;
+}
+
+function voiceNumberSelect(e164) {
+  _vnumSearch.selected = e164;
+  voiceNumberRenderResults();
+}
+
+function voiceNumberConfirm() {
+  const n = _vnumSearch.results.find(x => x.e164 === _vnumSearch.selected);
+  if (!n) return;
+  const body = document.getElementById("vnum-body");
+  body.innerHTML = `
+    <div style="text-align:center;padding:12px 0 4px">
+      <div class="text-muted" style="font-size:13px;margin-bottom:6px">You're getting</div>
+      <div style="font-size:26px;font-weight:700;letter-spacing:0.5px;margin-bottom:10px">${escHtml(n.display)}</div>
+      <div style="margin-bottom:16px">
+        ${n.capabilities.map(c => `<span class="badge ${c === "Voice" ? "badge-green" : "badge-gray"}" style="margin-right:4px">${c}</span>`).join("")}
+      </div>
+      <p class="text-muted" style="font-size:13px;margin-bottom:20px">
+        Included in the voice package — no setup or monthly number fees.<br>
+        The AI receptionist starts answering as soon as it's enabled.
+      </p>
+      <div class="flex-row" style="justify-content:center;gap:10px">
+        <button class="btn btn-secondary" onclick="voiceNumberShowSearch()">Back</button>
+        <button class="btn btn-primary" onclick="voiceNumberPurchase()">Confirm — Get Number</button>
+      </div>
+    </div>`;
+}
+
+function voiceNumberPurchase() {
+  const n = _vnumSearch.results.find(x => x.e164 === _vnumSearch.selected);
+  document.getElementById("voice-number-modal")?.remove();
+  _voiceMock.number = n.display;
+  renderVoiceTab(document.getElementById("channel-panel"), window._orgData.org);
+  toast(`Number ${n.display} assigned (preview — provisioning not wired yet)`, "success");
 }
 
 // ── Widget Tab ────────────────────────────────────────────────────────────────

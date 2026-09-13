@@ -45,6 +45,7 @@
     business_profiles: "business", business_services: "business", business_hours: "business", business_staff: "business",
     email_providers: "comms", integrations: "comms", notification_recipients: "comms", export_schedules: "comms",
     payment_history: "billing", credit_cycle_history: "billing",
+    org_usage_pools: "core", org_services: "core",
     analytics_events: "analytics", analytics_daily: "analytics", analytics_hourly: "analytics", audit_logs: "analytics",
     rate_limit_buckets: "system",
   };
@@ -262,6 +263,8 @@
             { data: widget },
             { data: lastPayment },
             { data: notes },
+            { data: pools },
+            { data: services },
           ] = await Promise.all([
             adminClient.schema("core").from("organizations").select("*").eq("id", org_id).single(),
             adminClient.schema("comms").from("email_providers").select("*").eq("organization_id", org_id),
@@ -278,13 +281,15 @@
               .eq("organization_id", org_id)
               .order("created_at", { ascending: false })
               .limit(100),
+            adminClient.schema("core").from("org_usage_pools").select("*").eq("organization_id", org_id),
+            adminClient.schema("core").from("org_services").select("*").eq("organization_id", org_id),
           ]);
 
           if (orgErr) throw orgErr;
 
           // Conversation stats for the current billing cycle (counts only, never
-          // content). Cycle resets on cycle_anchor_day (fallback: billing day).
-          const resetDay = Number(org?.cycle_anchor_day ?? org?.billing_day_of_month ?? 1) || 1;
+          // content). Cycle resets on the billing day of month.
+          const resetDay = Number(org?.billing_day_of_month ?? 1) || 1;
           const nowUtc = new Date();
           const cycleStart = nowUtc.getUTCDate() >= resetDay
             ? new Date(Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), resetDay))
@@ -340,7 +345,7 @@
             }
           }
 
-          return ok({ org, providers: providers || [], widget, kbDocs, lastPayment, conversationStats, client, notes: notes || [] });
+          return ok({ org, providers: providers || [], widget, kbDocs, lastPayment, conversationStats, client, notes: notes || [], pools: pools || [], services: services || [] });
         }
 
         // ── Add org note (account history) ──────────────────────────────────
@@ -483,7 +488,7 @@
 
         // ── Create org ──────────────────────────────────────────────────────
         case "create_org": {
-          const { name, slug, ai_tone, message_limit_per_month, auto_send_min_confidence, subscription_tier, subscription_plan } = body;
+          const { name, slug, ai_tone, message_limit_per_month, auto_send_min_confidence, subscription_tier, subscription_plan, services } = body;
 
           if (!name || !slug) return err("Missing name or slug", 400);
 
@@ -538,6 +543,26 @@
             enabled: false,
             disable_reason: "pending_activation",
           });
+
+          // Seed the shared credits pool + selected services (burn rate 1).
+          await adminClient.schema("core").from("org_usage_pools").insert({
+            organization_id: org.id,
+            pool: "credits",
+            monthly_limit: limit,
+          });
+          const svcList = (Array.isArray(services) ? services : ["webchat", "email"])
+            .filter((s: unknown) => s === "webchat" || s === "email");
+          if (svcList.length > 0) {
+            await adminClient.schema("core").from("org_services").insert(
+              svcList.map((s: string) => ({
+                organization_id: org.id,
+                service: s,
+                enabled: true,
+                usage_pool: "credits",
+                credit_cost: 1,
+              }))
+            );
+          }
 
           return ok({ org });
         }
@@ -1078,12 +1103,79 @@
 
           if (orgErr) throw orgErr;
 
+          // Reset the credit pools as well (addon credits untouched)
+          await adminClient
+            .schema("core").from("org_usage_pools")
+            .update({ used_this_month: 0, limit_exceeded_at: null, updated_at: new Date().toISOString() })
+            .eq("organization_id", org_id);
+
           await adminClient
             .schema("core").from("widget_configs")
             .update({ enabled: true, disable_reason: null, disable_message: null })
             .eq("organization_id", org_id)
             .eq("disable_reason", "usage_limit");
 
+          return ok({ success: true });
+        }
+
+        // ── Credit pools & services (Billing tab) ───────────────────────────
+        case "update_pool": {
+          if (!isOwner) return err("Only owners can edit credit pools", 403);
+          const { org_id, pool_id, updates } = body as {
+            org_id: string; pool_id: string; updates: Record<string, unknown>;
+          };
+          if (!org_id || !pool_id || !updates) return err("Missing org_id, pool_id, or updates", 400);
+          await assertOrgAccess(adminClient, dashUser, org_id);
+
+          const row: Record<string, unknown> = { updated_at: new Date().toISOString() };
+          if (typeof updates.monthly_limit !== "undefined") {
+            const v = Math.floor(Number(updates.monthly_limit));
+            if (!Number.isFinite(v) || v < 0) return err("monthly_limit must be a non-negative integer", 400);
+            row.monthly_limit = v;
+          }
+          if (typeof updates.addon_credits !== "undefined") {
+            const v = Math.floor(Number(updates.addon_credits));
+            if (!Number.isFinite(v) || v < 0) return err("addon_credits must be a non-negative integer", 400);
+            row.addon_credits = v;
+            if (v > 0) row.limit_exceeded_at = null; // fresh credits restore service
+          }
+
+          const { error } = await adminClient
+            .schema("core").from("org_usage_pools")
+            .update(row)
+            .eq("id", pool_id)
+            .eq("organization_id", org_id);
+          if (error) throw error;
+          return ok({ success: true });
+        }
+
+        case "update_service": {
+          if (!isOwner) return err("Only owners can edit services", 403);
+          const { org_id, service_id, updates } = body as {
+            org_id: string; service_id: string; updates: Record<string, unknown>;
+          };
+          if (!org_id || !service_id || !updates) return err("Missing org_id, service_id, or updates", 400);
+          await assertOrgAccess(adminClient, dashUser, org_id);
+
+          const row: Record<string, unknown> = { updated_at: new Date().toISOString() };
+          if (typeof updates.enabled !== "undefined") row.enabled = !!updates.enabled;
+          if (typeof updates.credit_cost !== "undefined") {
+            const v = Math.floor(Number(updates.credit_cost));
+            if (!Number.isInteger(v) || v < 1) return err("credit_cost must be a positive integer", 400);
+            row.credit_cost = v;
+          }
+          if (typeof updates.usage_pool !== "undefined") {
+            const v = String(updates.usage_pool || "").trim();
+            if (!/^[a-z0-9_]{1,40}$/.test(v)) return err("Invalid pool key", 400);
+            row.usage_pool = v;
+          }
+
+          const { error } = await adminClient
+            .schema("core").from("org_services")
+            .update(row)
+            .eq("id", service_id)
+            .eq("organization_id", org_id);
+          if (error) throw error;
           return ok({ success: true });
         }
 
@@ -1393,6 +1485,22 @@
             organization_id: org.id,
             enabled: true,
           });
+
+          // Seed the shared credits pool + default services
+          await adminClient.schema("core").from("org_usage_pools").insert({
+            organization_id: org.id,
+            pool: "credits",
+            monthly_limit: demoLimit,
+          });
+          await adminClient.schema("core").from("org_services").insert(
+            ["webchat", "email"].map((s) => ({
+              organization_id: org.id,
+              service: s,
+              enabled: true,
+              usage_pool: "credits",
+              credit_cost: 1,
+            }))
+          );
 
           // Create initial demo_defaults snapshot
           await adminClient.schema("core").from("demo_defaults").insert({
@@ -1942,17 +2050,26 @@
             const result = await extendSubscription(adminClient, org_id, category);
             if (!result.ok) return err(result.error!, result.status!);
           } else if (category === "addon") {
-            const { data: orgRow, error: orgErr } = await adminClient
-              .schema("core").from("organizations")
-              .select("addon_credits")
-              .eq("id", org_id)
-              .single();
-            if (orgErr) throw orgErr;
-            creditsAdded = ADDON_CREDITS;
-            await adminClient
-              .schema("core").from("organizations")
-              .update({ addon_credits: (orgRow?.addon_credits ?? 0) + ADDON_CREDITS })
-              .eq("id", org_id);
+            // Custom credit packs: employee picks the credit amount + price.
+            // Addon credits NEVER expire — they burn only after the monthly
+            // bucket is exhausted. Credits land on the shared 'credits' pool.
+            creditsAdded = Math.max(1, Math.floor(Number((body as Record<string, unknown>).credits) || ADDON_CREDITS));
+            const { data: pool } = await adminClient
+              .schema("core").from("org_usage_pools")
+              .select("id, addon_credits")
+              .eq("organization_id", org_id)
+              .eq("pool", "credits")
+              .maybeSingle();
+            if (pool) {
+              await adminClient
+                .schema("core").from("org_usage_pools")
+                .update({
+                  addon_credits: (pool.addon_credits ?? 0) + creditsAdded,
+                  limit_exceeded_at: null,
+                  updated_at: new Date().toISOString(),
+                })
+                .eq("id", pool.id);
+            }
             // Re-enable widget if it was disabled due to usage limit — addon credits restore service
             await adminClient
               .schema("core").from("widget_configs")
@@ -2029,7 +2146,7 @@
                 `We've received your payment of $${dollar} for the ${planLabel} for ${orgName}.`,
                 ``,
                 category === "addon"
-                  ? `${ADDON_CREDITS.toLocaleString()} message credits have been added to your account.`
+                  ? `${(creditsAdded ?? ADDON_CREDITS).toLocaleString()} message credits have been added to your account (they never expire).`
                   : endDateStr
                     ? `Your service is now active until ${endDateStr}.`
                     : `Your subscription has been renewed.`,
@@ -2102,8 +2219,8 @@
         // The customer pays this from their /payments page in the customer
         // dashboard, which creates the PayPal order at that point.
         case "create_dashboard_invoice": {
-          const { org_id, amount, description, category } = body as {
-            org_id: string; amount: number; description: string; category: string;
+          const { org_id, amount, description, category, credits } = body as {
+            org_id: string; amount: number; description: string; category: string; credits?: number;
           };
           if (!org_id || !amount || !description || !category) {
             return err("Missing org_id, amount, description, or category", 400);
@@ -2123,6 +2240,11 @@
               description,
               category,
               status: "awaiting_payment",
+              // Custom credit packs: recorded now so the customer-api capture
+              // applies the right amount when the invoice is paid.
+              credits_added: category === "addon"
+                ? Math.max(1, Math.floor(Number(credits) || ADDON_CREDITS))
+                : null,
               created_by: dashUser.id,
               created_by_name: dashUser.display_name,
             })

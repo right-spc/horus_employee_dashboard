@@ -420,6 +420,24 @@ function showNewOrgModal() {
             </select>
           </div>
         </div>
+        <div class="form-group">
+          <label>Services</label>
+          <div class="flex-row" style="gap:16px;flex-wrap:wrap">
+            <label style="display:flex;align-items:center;gap:6px;margin:0;cursor:pointer">
+              <input type="checkbox" id="new-org-svc-webchat" checked style="width:auto" /> Website Chat
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;margin:0;cursor:pointer">
+              <input type="checkbox" id="new-org-svc-email" checked style="width:auto" /> Email
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;margin:0;opacity:0.5" title="Coming soon">
+              <input type="checkbox" disabled style="width:auto" /> Voice <span class="hint">(soon)</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;margin:0;opacity:0.5" title="Coming soon">
+              <input type="checkbox" disabled style="width:auto" /> SMS <span class="hint">(soon)</span>
+            </label>
+          </div>
+          <div class="form-hint">Each active service burns the shared credit pool at its own rate.</div>
+        </div>
         ${isOwner ? `
         <div class="form-row">
           <div class="form-group">
@@ -466,6 +484,10 @@ async function createOrg() {
       ai_tone: document.getElementById("new-org-tone").value,
       subscription_tier: document.getElementById("new-org-tier").value,
       subscription_plan: document.getElementById("new-org-plan").value,
+      services: [
+        document.getElementById("new-org-svc-webchat").checked ? "webchat" : null,
+        document.getElementById("new-org-svc-email").checked ? "email" : null,
+      ].filter(Boolean),
     };
 
     if (isOwner) {
@@ -612,7 +634,7 @@ async function renderOrgDetail(main) {
         <button class="tab" onclick="switchTab('channels')">Channels</button>
         <button class="tab" onclick="switchTab('kb')">Knowledge Base</button>
         <button class="tab" onclick="switchTab('integrations')">Integrations</button>
-        <button class="tab" onclick="switchTab('payments')">Payments</button>
+        <button class="tab" onclick="switchTab('payments')">Billing</button>
         <button class="tab" onclick="switchTab('reports')">Reports</button>
         <button class="tab" onclick="switchTab('settings')">Settings</button>
       </div>
@@ -923,13 +945,19 @@ async function renderTab() {
 // ── Overview Tab ──────────────────────────────────────────────────────────────
 
 function renderOverviewTab(el, org, providers, widget, lastPayment, conversationStats, client, kbDocs, notes) {
-  const limit = org.message_limit_per_month || 0;
-  const used = org.messages_used_this_month || 0;
+  // Usage figures come from the shared credits pool (fall back to legacy org
+  // columns if the pool row is somehow missing).
+  const pools = window._orgData.pools || [];
+  const creditsPool = pools.find(p => p.pool === "credits") || pools[0] || null;
+  const limit = creditsPool ? (creditsPool.monthly_limit || 0) : (org.message_limit_per_month || 0);
+  const used = creditsPool ? (creditsPool.used_this_month || 0) : (org.messages_used_this_month || 0);
+  const addon = creditsPool ? (creditsPool.addon_credits || 0) : 0;
   const remaining = Math.max(0, limit - used);
+  const limitExceededAt = creditsPool?.limit_exceeded_at || org.limit_exceeded_at;
   const pct = limit > 0 ? Math.round((used / limit) * 100) : 0;
   const fillClass = pct >= 100 ? "danger" : pct >= 80 ? "warning" : "";
   const provider = providers[0];
-  const resetDay = conversationStats?.reset_day || org.cycle_anchor_day || org.billing_day_of_month || 1;
+  const resetDay = conversationStats?.reset_day || org.billing_day_of_month || 1;
   const now = new Date();
   const resetDateObj = now.getDate() < resetDay
     ? new Date(now.getFullYear(), now.getMonth(), resetDay)
@@ -971,7 +999,7 @@ function renderOverviewTab(el, org, providers, widget, lastPayment, conversation
           </div>
         </div>` : ""}
         <div style="border-top:1px solid var(--border);padding-top:14px;margin-top:2px">
-          ${org.limit_exceeded_at ? `<div class="alert alert-danger">Credit limit reached on ${new Date(org.limit_exceeded_at).toLocaleDateString()} — services are paused until the cycle resets.</div>` : ""}
+          ${limitExceededAt ? `<div class="alert alert-danger">Credit limit reached on ${new Date(limitExceededAt).toLocaleDateString()} — services are paused until the cycle resets.</div>` : ""}
           <div class="progress-wrap" style="margin-bottom:6px">
             <div class="progress-bar" style="height:10px">
               <div class="progress-fill ${fillClass}" style="width:${Math.min(pct, 100)}%"></div>
@@ -979,7 +1007,7 @@ function renderOverviewTab(el, org, providers, widget, lastPayment, conversation
             <span class="progress-label font-semibold">${pct}%</span>
           </div>
           <div class="text-muted" style="font-size:13px">
-            ${remaining.toLocaleString()} of ${limit.toLocaleString()} credits remaining · resets ${resetDate}
+            ${remaining.toLocaleString()} of ${limit.toLocaleString()} monthly credits remaining${addon > 0 ? ` · <strong>${addon.toLocaleString()}</strong> addon credits (never expire)` : ""} · resets ${resetDate}
           </div>
         </div>
       </div>
@@ -3436,15 +3464,20 @@ function loadPayPalSDK() {
 }
 
 // Preset definitions — all roles see all presets, only owner can pay directly via PayPal.
+// Credit packs are NOT a preset: the Add Credits card lets the employee pick
+// any credit amount + price (category "addon").
 const PAYMENT_PRESETS = [
   { key: "setup",   title: "Setup Fee", price: 199,  description: "Setup Fee",            category: "setup",   hint: "One-time setup" },
   { key: "monthly", title: "Monthly",   price: 299,  description: "Monthly Plan",         category: "monthly", hint: "Per billing cycle" },
   { key: "yearly",  title: "Yearly",    price: 3588, description: "Yearly Plan",          category: "yearly",  hint: "14 months of service (2 months free)" },
-  { key: "addon",   title: "Addon",     price: 59,   description: "Message credit addon", category: "addon",   hint: "+1,000 message credits" },
 ];
+
+const SERVICE_LABELS = { webchat: "Website Chat", email: "Email", voice: "Voice", sms: "SMS" };
 
 function renderPaymentsTab(el, org) {
   const presets = PAYMENT_PRESETS;
+  const pools = window._orgData.pools || [];
+  const services = window._orgData.services || [];
 
   const presetsHtml = presets.map(p => `
     <div class="payment-option">
@@ -3459,7 +3492,87 @@ function renderPaymentsTab(el, org) {
     </div>
   `).join("");
 
+  const poolsHtml = pools.length === 0
+    ? `<div class="empty-state"><p>No credit pools yet.</p></div>`
+    : pools.map(p => {
+        const used = p.used_this_month || 0;
+        const limit = p.monthly_limit || 0;
+        const addon = p.addon_credits || 0;
+        const pct = limit > 0 ? Math.round((used / limit) * 100) : 0;
+        const fillClass = pct >= 100 ? "danger" : pct >= 80 ? "warning" : "";
+        const attached = services.filter(s => s.usage_pool === p.pool).map(s => SERVICE_LABELS[s.service] || s.service).join(", ");
+        return `
+          <div style="border-top:1px solid var(--border);padding:14px 16px">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
+              <div style="font-weight:600;text-transform:capitalize">${escHtml(p.pool)} pool</div>
+              ${p.limit_exceeded_at ? `<span class="badge badge-red">Exhausted ${new Date(p.limit_exceeded_at).toLocaleDateString()}</span>` : ""}
+              <span class="text-muted" style="font-size:12px">${escHtml(attached || "no services attached")}</span>
+              ${isOwner ? `<button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="editPoolLimit('${p.id}', ${limit}, ${addon})">Edit</button>` : ""}
+            </div>
+            <div class="progress-wrap" style="margin-bottom:6px">
+              <div class="progress-bar" style="height:10px">
+                <div class="progress-fill ${fillClass}" style="width:${Math.min(pct, 100)}%"></div>
+              </div>
+              <span class="progress-label font-semibold">${pct}%</span>
+            </div>
+            <div class="text-sm text-muted">
+              ${(Math.max(0, limit - used)).toLocaleString()} of ${limit.toLocaleString()} monthly credits left
+              ${addon > 0 ? ` · <strong>${addon.toLocaleString()}</strong> addon credits (never expire)` : ""}
+            </div>
+          </div>`;
+      }).join("");
+
+  const servicesHtml = services.length === 0
+    ? `<div class="empty-state"><p>No services configured.</p></div>`
+    : `<div class="table-wrap"><table>
+        <thead><tr><th>Service</th><th>Status</th><th>Pool</th><th>Burn rate</th>${isOwner ? "<th></th>" : ""}</tr></thead>
+        <tbody>${services.map(s => `
+          <tr>
+            <td class="font-semibold">${SERVICE_LABELS[s.service] || escHtml(s.service)}</td>
+            <td><span class="badge ${s.enabled ? "badge-green" : "badge-red"}">${s.enabled ? "Active" : "Off"}</span></td>
+            <td class="text-sm text-muted">${escHtml(s.usage_pool)}</td>
+            <td class="text-sm">${s.credit_cost} credit${s.credit_cost === 1 ? "" : "s"} / ${s.service === "voice" ? "minute" : "message"}</td>
+            ${isOwner ? `<td class="table-actions">
+              <button class="btn btn-ghost btn-sm" onclick="editService('${s.id}', '${s.service}', ${s.credit_cost}, ${s.enabled})">Edit</button>
+            </td>` : ""}
+          </tr>`).join("")}
+        </tbody>
+      </table></div>`;
+
   el.innerHTML = `
+    <div class="card mb-4">
+      <div class="card-header"><div class="card-title">Credit Pools</div></div>
+      ${poolsHtml}
+    </div>
+
+    <div class="card mb-4">
+      <div class="card-header"><div class="card-title">Services &amp; Burn Rates</div></div>
+      ${servicesHtml}
+    </div>
+
+    <div class="card mb-4">
+      <div class="card-header"><div class="card-title">Add Credits</div></div>
+      <div class="card-body">
+        <p class="text-muted" style="font-size:13px;margin-bottom:12px">
+          Sell a custom credit pack. Addon credits <strong>never expire</strong> — they burn only after the monthly bucket runs out.
+        </p>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Credits</label>
+            <input type="number" id="pay-addon-credits" min="1" step="1" value="1000" />
+          </div>
+          <div class="form-group">
+            <label>Price (USD)</label>
+            <input type="number" id="pay-addon-price" min="1" step="0.01" value="59" />
+          </div>
+        </div>
+        <div class="flex-row">
+          ${isOwner ? `<button class="btn btn-primary" onclick="selectAddonPayment()">Pay with PayPal</button>` : ""}
+          <button class="btn btn-secondary" onclick="sendAddonToDashboard()">Send to dashboard</button>
+        </div>
+      </div>
+    </div>
+
     <div class="card mb-4">
       <div class="card-header"><div class="card-title">Payment Options</div></div>
       <div class="card-body">
@@ -3508,6 +3621,85 @@ function renderPaymentsTab(el, org) {
   loadPaymentHistory();
 }
 
+// ── Credit pools & services editing (owner) ──────────────────────────────────
+
+async function editPoolLimit(poolId, currentLimit, currentAddon) {
+  const limitStr = prompt("Monthly credit limit (resets each cycle):", String(currentLimit));
+  if (limitStr === null) return;
+  const monthlyLimit = parseInt(limitStr, 10);
+  if (!Number.isFinite(monthlyLimit) || monthlyLimit < 0) { toast("Invalid limit", "error"); return; }
+
+  const addonStr = prompt("Addon credits balance (never expires):", String(currentAddon));
+  if (addonStr === null) return;
+  const addonCredits = parseInt(addonStr, 10);
+  if (!Number.isFinite(addonCredits) || addonCredits < 0) { toast("Invalid addon balance", "error"); return; }
+
+  try {
+    await api("update_pool", {
+      org_id: currentOrgId,
+      pool_id: poolId,
+      updates: { monthly_limit: monthlyLimit, addon_credits: addonCredits },
+    });
+    toast("Pool updated", "success");
+    const data = await api("get_org", { org_id: currentOrgId });
+    window._orgData = { ...window._orgData, ...data };
+    renderTab();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function editService(serviceId, service, currentCost, currentEnabled) {
+  const costStr = prompt(`Burn rate for ${SERVICE_LABELS[service] || service} (credits per ${service === "voice" ? "minute" : "message"}):`, String(currentCost));
+  if (costStr === null) return;
+  const creditCost = parseInt(costStr, 10);
+  if (!Number.isInteger(creditCost) || creditCost < 1) { toast("Invalid burn rate", "error"); return; }
+
+  const enable = confirm(`${SERVICE_LABELS[service] || service} is currently ${currentEnabled ? "ACTIVE" : "OFF"}.\n\nOK = Active · Cancel = Off`);
+
+  try {
+    await api("update_service", {
+      org_id: currentOrgId,
+      service_id: serviceId,
+      updates: { credit_cost: creditCost, enabled: enable },
+    });
+    toast("Service updated", "success");
+    const data = await api("get_org", { org_id: currentOrgId });
+    window._orgData = { ...window._orgData, ...data };
+    renderTab();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+// ── Custom credit packs ───────────────────────────────────────────────────────
+
+function readAddonInputs() {
+  const credits = parseInt(document.getElementById("pay-addon-credits").value, 10);
+  const price = parseFloat(document.getElementById("pay-addon-price").value);
+  if (!Number.isInteger(credits) || credits < 1) { toast("Enter a valid credit amount", "error"); return null; }
+  if (!price || price <= 0) { toast("Enter a valid price", "error"); return null; }
+  return { credits, price, description: `${credits.toLocaleString()} message credits` };
+}
+
+function selectAddonPayment() {
+  const input = readAddonInputs();
+  if (!input) return;
+  renderPayPalButtons(input.price, input.description, "addon", input.credits);
+}
+
+async function sendAddonToDashboard() {
+  const input = readAddonInputs();
+  if (!input) return;
+  try {
+    await api("create_dashboard_invoice", {
+      org_id: currentOrgId,
+      amount: input.price,
+      description: input.description,
+      category: "addon",
+      credits: input.credits,
+    });
+    toast("Invoice sent to customer dashboard", "success");
+    loadPaymentHistory();
+  } catch (e) { toast(e.message, "error"); }
+}
+
 function escAttr(s) {
   return String(s).replace(/'/g, "&#39;").replace(/"/g, "&quot;");
 }
@@ -3547,7 +3739,7 @@ async function sendToDashboard(amount, description, category) {
   }
 }
 
-async function renderPayPalButtons(amount, description, category) {
+async function renderPayPalButtons(amount, description, category, credits = null) {
   const container = document.getElementById("paypal-container");
   const buttonsEl = document.getElementById("paypal-buttons");
   const summaryEl = document.getElementById("paypal-summary");
@@ -3586,6 +3778,7 @@ async function renderPayPalButtons(amount, description, category) {
             category,
             amount,
             description,
+            credits,
           });
           container.innerHTML = `
             <div class="card mb-4">

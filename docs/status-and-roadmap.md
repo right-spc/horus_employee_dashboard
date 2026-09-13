@@ -1,6 +1,6 @@
 # Horus Desk — Status & Roadmap
 
-> Last updated: **2026-09-11** · Branch state: `redesign` = `0ecfb2a` (KB redo + tone field), `main` = `f73b1c2` (production, KB redo NOT yet released)
+> Last updated: **2026-09-11** · Branch state: `redesign` = KB redo + tone field + **credit pools** (unreleased), `main` = `f73b1c2` (production)
 > This is the single reference for what's shipped, what's pending, and how we work. Related docs: `voice-channel-plan.md` (approved, not started), `client-rbac-plan.md` (§5 = KB versioning model).
 
 ---
@@ -35,6 +35,15 @@
 - **New dashboard-api actions (deployed)**: `get_business_details`, `update_business_profile` (upsert; demo write-protection for non-owners; `business_name` NOT NULL → falls back to org name; `country` omits when cleared), `update_business_hours` (validated delete+replace).
 - **AI tone = free text, 200 chars** (was fixed select) — input + live counter; server-side trim/cap/empty→null; interpolated raw into prompt (`"Your tone should be {ai_tone}…"`).
 
+### Credit pools (services & billing overhaul)
+- **New tables**: `core.org_usage_pools` (org, pool key, `monthly_limit`, `addon_credits` **never expire**, `used_this_month`, `limit_exceeded_at`) + `core.org_services` (org, service webchat/email/voice/sms, `enabled`, `usage_pool`, `credit_cost`). Seeded 1:1 for all 14 orgs (nobody held rollover/addon balances).
+- **New RPCs** (replacing the un-repoed legacy ones): `is_pool_exceeded(org, service)`, `increment_pool_usage(org, service)` (monthly bucket burns first, overflow burns addon; keeps legacy `messages_used_this_month` +1 for compat), `reset_pools_for_day(day)` (same subscription-end-day anchor, cycle-history log, widget re-enable). Legacy columns/functions remain until deferred cleanup.
+- **Burn model (owner decisions)**: monthly credits die at reset (no rollover machinery); addon credits never expire and burn only after monthly runs out; webchat+email cost 1/message; voice=10/min, SMS=3 when those ship.
+- **Enforcement switched**: widget-chat + handle-inbound-email now call pool RPCs (verified live: pool 395→396 on a real widget message); `reset-usage-counters` cron uses `reset_pools_for_day` (phantom `cycle_anchor_day` dead code removed — the old RPC had been re-enabling widgets all along).
+- **Payments tab → Billing tab**: Credit Pools card (usage bars, owner edit limit/addon), Services & Burn Rates card (toggle + burn-rate edit), **Add Credits card** (custom credit amount + price — replaces fixed $59/1,000 preset; threaded through PayPal capture + dashboard invoices via `credits_added`), existing payment options/history below.
+- **dashboard-api**: `get_org` returns `pools` + `services`; new owner-only `update_pool` / `update_service`; `create_org` accepts a services picker (webchat/email, voice/sms "soon") and seeds pool+services; `create_demo` seeds both; `reset_usage` resets pools; customer-api invoice capture applies `credits_added` to the pool.
+- **Overview bar** reads from the pool (+ addon balance shown); phantom `cycle_anchor_day` fallback removed.
+
 ### Schema facts learned this phase
 - Business tables live in `business` schema; `core.business_*` are security-invoker bridge views (writes through them verified).
 - `business_hours`: `UNIQUE(organization_id, day_of_week, open_time)`, `CHECK (is_open → times required)`; one slot per day (no split shifts — would need schema + prompt change).
@@ -44,9 +53,8 @@
 
 ## 3. Remaining work
 
-### 🔴 Services/credits overhaul (big Phase 3 piece)
-- New `core.org_services` + `core.org_usage_pools` — credit-denominated, per-service burn rates (webchat 1 / email 10 / voice 3), per-pool limits; new-org modal services picker; per-pool limit editing.
-- **Riding along — LIVE BUG:** `reset-usage-counters` cron queries non-existent `core.organizations.cycle_anchor_day` → usage-limit-paused widgets likely never auto re-enable.
+### 🔴 Voice channel (NEXT UP)
+- See `voice-channel-plan.md` (approved; note: it references the DROPPED `kb.kb_chunks` and the old tab layout — needs a refresh pass before building). Voice usage will be a service row (`credit_cost` per minute) burning the shared pool — the plumbing is now in place. `messaging.conversations.channel` CHECK still lacks `'voice'` — alter in the voice migration.
 
 ### 🟡 Smaller gaps
 - **Business staff editor** — `business_staff` has no UI; fits as a card in KB → Business Details.
@@ -54,7 +62,7 @@
 - **Voice/SMS channel** — see `voice-channel-plan.md` (approved; note: it references the DROPPED `kb.kb_chunks` and the old tab layout — needs a refresh pass before building).
 
 ### ⚪ Deferred cleanup (owner decides at end)
-- `usage_reset_date` column, rollover credits logic, `subscription_tier`, `auto_send_enabled`/`auto_send_min_confidence` + dead auto-send block in handle-inbound-email.
+- Legacy credit columns now write-mostly: `rollover_credits`, `monthly_credits_remaining`, org-level `addon_credits`, plus legacy RPCs `increment_message_usage` / `is_usage_exceeded` / `reset_monthly_usage_for_day` — drop after the pool model proves out. Also: `usage_reset_date` (stale), `subscription_tier`, `auto_send_enabled`/`auto_send_min_confidence` + dead auto-send block in handle-inbound-email.
 - Test data on HD org (disclaimer sample, placeholder logo).
 
 ### 🚀 Release pending

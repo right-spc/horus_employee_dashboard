@@ -792,17 +792,25 @@ Deno.serve(async (req: Request) => {
           const result = await extendSubscription(adminClient, orgId, payment.category);
           if (!result.ok) return err(result.error!, result.status!, cors);
         } else if (payment.category === "addon") {
-          const { data: orgRow, error: orgErr } = await adminClient
-            .schema("core").from("organizations")
-            .select("addon_credits")
-            .eq("id", orgId)
-            .single();
-          if (orgErr) throw orgErr;
-          creditsAdded = ADDON_CREDITS;
-          await adminClient
-            .schema("core").from("organizations")
-            .update({ addon_credits: (orgRow?.addon_credits ?? 0) + ADDON_CREDITS })
-            .eq("id", orgId);
+          // Custom credit packs: credits_added on the invoice row wins,
+          // else the default pack. Addon credits never expire.
+          creditsAdded = Math.max(1, Math.floor(Number(payment.credits_added) || ADDON_CREDITS));
+          const { data: pool } = await adminClient
+            .schema("core").from("org_usage_pools")
+            .select("id, addon_credits")
+            .eq("organization_id", orgId)
+            .eq("pool", "credits")
+            .maybeSingle();
+          if (pool) {
+            await adminClient
+              .schema("core").from("org_usage_pools")
+              .update({
+                addon_credits: (pool.addon_credits ?? 0) + creditsAdded,
+                limit_exceeded_at: null,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", pool.id);
+          }
           await adminClient
             .schema("core").from("widget_configs")
             .update({ enabled: true, disable_reason: null, disable_message: null })

@@ -1,18 +1,14 @@
 // ============================================
 // EDGE FUNCTION: reset-usage-counters
 // Cron: DAILY at 00:00 UTC
-// For each org whose cycle_anchor_day matches today's UTC day:
-//   - rolls leftover monthly credits into rollover_credits
-//     (any prior rollover is discarded — "only once" rule)
-//   - refills monthly_credits_remaining = message_limit_per_month
-//   - leaves addon_credits untouched
-//   - clears messages_used_this_month + limit flags
-// Then re-enables widgets that were disabled with reason="usage_limit"
-// for any of those orgs.
-//
-// NOTE: cycle_anchor_day is the day the effective service period rolls
-// over. It is set at org creation and does NOT change when the customer
-// moves their billing/payment-due date (billing_day_of_month).
+// Delegates to the DB function reset_pools_for_day(today's UTC day), which:
+//   - resets each pool's used_this_month to 0 (monthly credits die; unused
+//     do NOT roll over)
+//   - leaves addon_credits untouched (never expire)
+//   - logs billing.credit_cycle_history
+//   - clears legacy org limit flags + messages_used_this_month
+//   - re-enables widgets disabled with reason="usage_limit"
+// Anchor: orgs whose subscription_end_date day-of-month (UTC) == today.
 // ============================================
 
 import { createClient } from "npm:@supabase/supabase-js@2";
@@ -30,7 +26,7 @@ Deno.serve(async (req: Request) => {
   try {
     const day = new Date().getUTCDate();
 
-    // Skip days 29-31 — billing_day_of_month is constrained to 1-28.
+    // Skip days 29-31 — cycle anchor days are constrained to 1-28.
     if (day > 28) {
       console.log(`Day ${day} > 28, skipping reset.`);
       return new Response(
@@ -39,32 +35,15 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const { data: orgsReset, error } = await supabase.rpc("reset_monthly_usage_for_day", {
+    const { data: orgsReset, error } = await supabase.rpc("reset_pools_for_day", {
       p_day: day,
     });
 
     if (error) {
-      throw new Error(`reset_monthly_usage_for_day failed: ${error.message}`);
+      throw new Error(`reset_pools_for_day failed: ${error.message}`);
     }
 
-    console.log(`Daily reset complete for day ${day}. Orgs reset: ${orgsReset}`);
-
-    // Re-enable widgets that had been disabled due to usage_limit, scoped to
-    // the orgs whose cycle anchor day is today (i.e. their new effective
-    // period just started).
-    const { data: orgIds } = await supabase
-      .schema("core").from("organizations")
-      .select("id")
-      .eq("cycle_anchor_day", day);
-
-    if (orgIds && orgIds.length > 0) {
-      const ids = orgIds.map((o: { id: string }) => o.id);
-      await supabase
-        .schema("core").from("widget_configs")
-        .update({ enabled: true, disable_reason: null, disable_message: null })
-        .in("organization_id", ids)
-        .eq("disable_reason", "usage_limit");
-    }
+    console.log(`Daily pool reset complete for day ${day}. Orgs reset: ${orgsReset}`);
 
     return new Response(
       JSON.stringify({ status: "ok", day, orgs_reset: orgsReset }),

@@ -2556,13 +2556,14 @@ function extractName(from: string): string | null {
 
 // ── Usage limit helpers (inlined — no shared module) ─────────────────────────
 
-// Check if an org has exceeded their monthly message limit.
+// Check if the pool backing the email service is exhausted.
 async function checkUsageLimit(
   supabase: ReturnType<typeof createClient>,
   organizationId: string
 ): Promise<boolean> {
-  const { data, error } = await supabase.rpc("is_usage_exceeded", {
-    org_id: organizationId,
+  const { data, error } = await supabase.rpc("is_pool_exceeded", {
+    p_org: organizationId,
+    p_service: "email",
   });
   if (error) {
     console.error("Usage limit check failed:", error.message);
@@ -2571,14 +2572,15 @@ async function checkUsageLimit(
   return data === true;
 }
 
-// Increment monthly usage counter after a successful AI exchange.
-// Returns true if this call pushed the org over their limit.
+// Burn email-service credits after a successful AI exchange.
+// Returns true if this call exhausted the pool.
 async function incrementUsage(
   supabase: ReturnType<typeof createClient>,
   organizationId: string
 ): Promise<boolean> {
-  const { data, error } = await supabase.rpc("increment_message_usage", {
-    org_id: organizationId,
+  const { data, error } = await supabase.rpc("increment_pool_usage", {
+    p_org: organizationId,
+    p_service: "email",
   });
   if (error) {
     console.error("Usage increment failed:", error.message);

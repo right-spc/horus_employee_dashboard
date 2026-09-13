@@ -1255,13 +1255,13 @@ function openAuthLink() {
 // reset on reload. See docs/voice-channel-plan.md Phase 2.
 
 // Real Telnyx Ultra voices (natural tier, marketed for live voice-AI agents).
+// Shortlist curated by owner via REAL test calls (Phase 0, 2026-09-13): Cindy and
+// Kendra rejected — heteronym stumbles ("live"→"leave" etc.). These 4 passed.
 // IDs are the actual catalog IDs — these carry straight through to wiring.
 // Preview clips were generated once via the Telnyx TTS API and ship as static
 // assets in public/voice-previews/ (org-agnostic sample line).
 const VOICE_OPTIONS = [
-  { id: "cindy",  name: "Cindy",  desc: "Warm, welcoming female — the classic receptionist", telnyx: "Telnyx.Ultra.1242fb95-7ddd-44ac-8a05-9e8a22a6137d" },
   { id: "rachel", name: "Rachel", desc: "Polished, professional female",                    telnyx: "Telnyx.Ultra.10bd4af4-825b-49b8-b8bd-0ca11865536e" },
-  { id: "kendra", name: "Kendra", desc: "Smooth, clear female communicator",                telnyx: "Telnyx.Ultra.358e650d-ac0b-4a74-b14f-aca3daa40d79" },
   { id: "reed",   name: "Reed",   desc: "Polished, professional male",                      telnyx: "Telnyx.Ultra.533b2990-5b82-45a4-b9f2-367776972ca6" },
   { id: "carson", name: "Carson", desc: "Friendly, approachable male",                      telnyx: "Telnyx.Ultra.4df027cb-2920-4a1f-8c34-f21529d5c3fe" },
   { id: "chase",  name: "Chase",  desc: "Steady, helpful male",                             telnyx: "Telnyx.Ultra.59cb0f89-5d66-49f8-b965-f72b252789e0" },
@@ -1275,7 +1275,7 @@ function voiceMockState(orgId) {
     orgId,
     number: null,              // null = no number provisioned yet
     enabled: false,
-    voice: "cindy",
+    voice: "rachel",
     greeting: "Thank you for calling! How can I help you today?",
     transferEnabled: false,
     transferNumber: "",

@@ -74,26 +74,28 @@ Fixed cost per idle org: **$1/mo**. A 200-call/mo client (~13 talk-hours) ≈ **
 
 ## 5. Phases
 
-### Phase 0 — Spike (~1 day, ~$5, no prod changes)
+### Phase 0 — Spike ✅ COMPLETE (2026-09-13, ~$0.80 spent)
 
-Prove quality before building product surface:
+Proved on real PSTN calls to **+1 855 585 5518** (owner's number, assigned to the test assistant `assistant-ad33433a-357d-4ade-bea3-3f0c0d0463e6`):
 
-1. `GET /v2/ai/models` with existing `TELNYX_API_KEY` — confirm `moonshotai/Kimi-K2.6` for assistants
-2. Buy one $1 test number
-3. Create assistant via API (`POST /ai/assistants`): Horus Desk org's real full KB in instructions + voice wrapper, greeting, Deepgram STT, TTS voice pick, `hangup` tool + stub `check_availability` webhook tool
-4. Wire inbound (minimal Call Control app or portal assignment for spike only) → `ai_assistant_start`
-5. **Call it from a real phone.** Test: KB accuracy, latency/dead air, tool call, escalation phrasing, warm transfer to owner's cell, hangup behavior, transcript webhook payload
-6. If quality disappoints → flip model to `anthropic/claude-haiku-4-5`, call again, A/B compare
-7. Measure real per-call cost from Telnyx usage records vs $0.06/min estimate
-
-**Exit criteria:** owner approves call quality; tool round-trips inside filler thresholds; transcript webhook confirmed sufficient for inbox rendering; transfer edge cases (what caller hears during dial) validated live.
+- ✅ **Kimi K2.6 latency approved by owner** — snappy turn-taking on a full 41K-char production prompt (custom org prompt + business hours + all 11 live KB sections + voice channel block). No A/B with haiku needed. `recommended_for_assistants: true`; cached input $0.08/1M tokens.
+- ✅ **Instructions scale** — 41K chars accepted fine; buried KB facts (Cairo address, privacy email, "sales close with humans") answered accurately at phone speed.
+- ✅ **KB-in-instructions design confirmed** — no RAG; `{{telnyx_current_time}}` for date awareness.
+- ✅ **Recording + transcript** — dual-channel MP3 auto-on (`telephony_settings.recording_settings`); transcript retrievable via `GET /v2/ai/conversations/{id}/messages`. Recordings saved in `phase0-recordings/` (local, uncommitted).
+- ✅ **Cost ≈ $0.076/min blended** ($0.19 + $0.62 for 2.4 + 8.1 min calls) — on the $0.06–0.08/min estimate. NOTE: no per-call CDR via API (404s) — exact figures come from the portal invoice; our `voice.calls.cost_usd` gets computed from rates + token counts.
+- ⚠️ **GOTCHA — API-created assistants have NO default hangup tool** (portal-created ones do). Calls never hung up until `{"type":"hangup"}` was attached explicitly. **Phase 1 provisioning MUST attach it.** Rule v2 that works: one ≤5-word goodbye + tool in the SAME turn, never wait for a reply.
+- ⚠️ **Ultra heteronym stumbles** — "live"→"leave" etc. on Cindy/Kendra (rejected via owner call-testing). **Approved shortlist: Rachel, Reed, Carson, Chase.** Mitigations baked into the prompt template: never use the word "live" (adjective) in generated text; per-org pronunciation dictionary (`voice_settings.pronunciation_dict_id`) planned in Phase 1 for proper nouns (business names, street names).
+- 📌 **Persona pattern**: greeting = "I am Horus, your AI assistant" — voice name never spoken; picker names are internal labels only.
+- 📌 **Number assignment via API**: assistant auto-creates a TeXML app (`telephony_settings.default_texml_app_id`); point the number's voice `connection_id` at it. (Production still goes the Call Control webhook path — Phase 1.)
+- 📌 **Telnyx GET /ai/assistants shape is flaky** — sometimes returns `.data`-wrapped, sometimes bare, and during PATCH processing `instructions` can read as null. **Never PATCH instructions fetched without a status+presence check** (two wipe-and-rebuilds in the spike).
+- ⏭️ Not spike-tested (Phase 1): warm transfer, check_availability tool round-trips, Call Control routing path, transcript→inbox webhook.
 
 ### Phase 1 — Core plumbing (multi-tenant inbound, ~2–4 days)
 
 **1a. DB migration** ✅ APPLIED (`supabase/migrations/20260917000000_voice_schema.sql`) — landed in a NEW `voice` schema (one-domain-per-schema house pattern) instead of `comms`:
 - `voice.phone_numbers` — id, organization_id (UNIQUE — 1/org v1), telnyx_number_id, phone_number (E.164, UNIQUE), capabilities, status (pending/active/released/failed), monthly_cost_cents (internal only — bundled pricing)
 - `voice.calls` — id, organization_id, conversation_id (nullable), telnyx_call_control_id (unique), direction, from/to_number, assistant_id, answered/ended_at, duration_seconds, **recording_url** (internal only — calls ARE recorded; employees have no path to it), engine_minutes, llm token counts, cost_usd, outcome (+voicemail/forwarded), hangup_reason, credits_charged. **NO core bridge view** — PostgREST has no path to raw call rows; aggregates via server-side RPC (later phase)
-- `voice.configs` — organization_id PK, enabled, telnyx_assistant_id, tts_voice (default = Cindy Ultra), greeting_text, after_hours_mode, transfer_enabled/number, fallback_mode/number, voicemail_greeting, **recording_enabled** (default true — 2-party-consent disclosure in greeting; added `20260917010000`), instructions_version, synced_at. Server CHECKs: transfer needs a number; forward fallback needs a number. (max_monthly_minutes dropped — superseded by credit pool)
+- `voice.configs` — organization_id PK, enabled, telnyx_assistant_id, tts_voice (default = **Rachel** Ultra; was Cindy pre-curation, `20260917020000`), greeting_text, after_hours_mode, transfer_enabled/number, fallback_mode/number, voicemail_greeting, **recording_enabled** (default true — 2-party-consent disclosure in greeting; added `20260917010000`), instructions_version, synced_at. Server CHECKs: transfer needs a number; forward fallback needs a number. (max_monthly_minutes dropped — superseded by credit pool)
 - ✅ `messaging.conversations.channel` CHECK altered — now includes 'voice'
 - ✅ `core.phone_numbers` + `core.voice_configs` security-invoker bridge views (PostgREST path); RLS org-isolation policies on all 3 tables (same `auth_org_id()` pattern)
 - TODO `core.org_services` row for voice per org (usage_pool 'credits', credit_cost 10/min placeholder) — the credit-pool migration (20260915000000) already built this machinery

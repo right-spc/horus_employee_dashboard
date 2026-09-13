@@ -3712,98 +3712,202 @@ function loadPayPalSDK() {
   });
 }
 
-// Preset definitions — all roles see all presets, only owner can pay directly via PayPal.
-// Credit packs are NOT a preset: the Add Credits card lets the employee pick
-// any credit amount + price (category "addon").
-const PAYMENT_PRESETS = [
-  { key: "setup",   title: "Setup Fee", price: 199,  description: "Setup Fee",            category: "setup",   hint: "One-time setup" },
-  { key: "monthly", title: "Monthly",   price: 299,  description: "Monthly Plan",         category: "monthly", hint: "Per billing cycle" },
-  { key: "yearly",  title: "Yearly",    price: 3588, description: "Yearly Plan",          category: "yearly",  hint: "14 months of service (2 months free)" },
-];
+// ── Billing tab ───────────────────────────────────────────────────────────────
+// Dynamic model: activated services + one free-form monthly price + monthly
+// credit allowance + 1-cycle rollover + never-expiring addons. No plan names,
+// no preset prices — presets are dead.
+// Price / term / free-months / rollover run on session-local mock state
+// (_billingMock) until the pricing schema lands — marked "UI preview".
+// Services, credit buckets, addon credits and payment history are REAL data.
+
+let _billingMock = null; // per-org mock state, built by billingMockState()
+
+function billingMockState(orgId) {
+  if (_billingMock && _billingMock.orgId === orgId) return _billingMock;
+  _billingMock = {
+    orgId,
+    price: 500,            // monthly price (USD) — floor-enforced server-side later
+    term: "monthly",       // monthly | yearly
+    freeMonths: 0,         // extra months granted on yearly renewal (RBAC-capped later)
+    rolloverEnabled: true, // monthly credits carry exactly 1 cycle when on
+    rolloverCredits: 0,    // bucket balance — real column lands with the migration
+  };
+  return _billingMock;
+}
+
+function billingPreviewToast() {
+  toast("UI preview — dynamic pricing isn't wired yet, nothing was saved.", "default");
+}
+
+function billingMockField(key, value) {
+  _billingMock[key] = value;
+  renderTab();
+  billingPreviewToast();
+}
+
+function billingSavePlan() {
+  const price = parseFloat(document.getElementById("bill-price").value);
+  if (!Number.isFinite(price) || price < 0) { toast("Enter a valid monthly price", "error"); return; }
+  _billingMock.price = price;
+  if (_billingMock.term === "yearly") {
+    _billingMock.freeMonths = parseInt(document.getElementById("bill-free-months")?.value || "0", 10) || 0;
+  }
+  billingPreviewToast();
+}
+
+// The pool reset cron anchors on subscription_end_date day-of-month — this is
+// the REAL reset date (billing_day_of_month is display-only and can drift).
+function creditCycleResetDate(org) {
+  const anchorDay = org.subscription_end_date
+    ? new Date(org.subscription_end_date).getUTCDate()
+    : (org.billing_day_of_month || 1);
+  const now = new Date();
+  let d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), anchorDay));
+  if (d <= now) d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, anchorDay));
+  return d;
+}
 
 const SERVICE_LABELS = { webchat: "Website Chat", email: "Email", voice: "Voice", sms: "SMS" };
+const CHANNEL_ORDER = ["webchat", "email", "voice"];
 
 function renderPaymentsTab(el, org) {
-  const presets = PAYMENT_PRESETS;
+  const m = billingMockState(org.id);
   const pools = window._orgData.pools || [];
   const services = window._orgData.services || [];
+  const pool = pools.find(p => p.pool === "credits") || pools[0] || null;
 
-  const presetsHtml = presets.map(p => `
-    <div class="payment-option">
-      <div class="payment-option-title">${escHtml(p.title)}</div>
-      <div class="payment-option-price">$${p.price.toLocaleString()}</div>
-      <div class="payment-option-desc">${escHtml(p.hint)}</div>
-      <div class="payment-option-actions">
-        ${isOwner ? `<button class="btn btn-primary btn-sm" onclick="selectPayment(${p.price}, '${escAttr(p.description)}', '${p.category}')">Pay with PayPal</button>` : ""}
-        <button class="btn btn-secondary btn-sm" onclick="sendPaymentLink(${p.price}, '${escAttr(p.description)}', '${p.category}')">Send link</button>
-        <button class="btn btn-secondary btn-sm" onclick="sendToDashboard(${p.price}, '${escAttr(p.description)}', '${p.category}')">Send to dashboard</button>
-      </div>
-    </div>
-  `).join("");
+  // Credits math — real columns today; rollover bucket is mock until the migration lands
+  const limit = pool?.monthly_limit || 0;
+  const used = pool?.used_this_month || 0;
+  const monthlyLeft = Math.max(0, limit - used);
+  const addon = pool?.addon_credits || 0;
+  const rollover = m.rolloverEnabled ? m.rolloverCredits : 0;
+  const available = rollover + monthlyLeft + addon;
+  const pct = limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0;
+  const fillClass = pct >= 100 ? "danger" : pct >= 80 ? "warning" : "";
+  const resetStr = creditCycleResetDate(org).toLocaleDateString("en-US", { month: "long", day: "numeric" });
+  const suspended = !!pool?.limit_exceeded_at;
 
-  const poolsHtml = pools.length === 0
-    ? `<div class="empty-state"><p>No credit pools yet.</p></div>`
-    : pools.map(p => {
-        const used = p.used_this_month || 0;
-        const limit = p.monthly_limit || 0;
-        const addon = p.addon_credits || 0;
-        const pct = limit > 0 ? Math.round((used / limit) * 100) : 0;
-        const fillClass = pct >= 100 ? "danger" : pct >= 80 ? "warning" : "";
-        const attached = services.filter(s => s.usage_pool === p.pool).map(s => SERVICE_LABELS[s.service] || s.service).join(", ");
-        return `
-          <div style="border-top:1px solid var(--border);padding:14px 16px">
-            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
-              <div style="font-weight:600;text-transform:capitalize">${escHtml(p.pool)} pool</div>
-              ${p.limit_exceeded_at ? `<span class="badge badge-red">Exhausted ${new Date(p.limit_exceeded_at).toLocaleDateString()}</span>` : ""}
-              <span class="text-muted" style="font-size:12px">${escHtml(attached || "no services attached")}</span>
-              ${isOwner ? `<button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="editPoolLimit('${p.id}', ${limit}, ${addon})">Edit</button>` : ""}
-            </div>
-            <div class="progress-wrap" style="margin-bottom:6px">
-              <div class="progress-bar" style="height:10px">
-                <div class="progress-fill ${fillClass}" style="width:${Math.min(pct, 100)}%"></div>
-              </div>
-              <span class="progress-label font-semibold">${pct}%</span>
-            </div>
-            <div class="text-sm text-muted">
-              ${(Math.max(0, limit - used)).toLocaleString()} of ${limit.toLocaleString()} monthly credits left
-              ${addon > 0 ? ` · <strong>${addon.toLocaleString()}</strong> addon credits (never expire)` : ""}
-            </div>
-          </div>`;
-      }).join("");
-
-  const servicesHtml = services.length === 0
-    ? `<div class="empty-state"><p>No services configured.</p></div>`
-    : `<div class="table-wrap"><table>
-        <thead><tr><th>Service</th><th>Status</th><th>Pool</th><th>Burn rate</th>${isOwner ? "<th></th>" : ""}</tr></thead>
-        <tbody>${services.map(s => `
-          <tr>
-            <td class="font-semibold">${SERVICE_LABELS[s.service] || escHtml(s.service)}</td>
-            <td><span class="badge ${s.enabled ? "badge-green" : "badge-red"}">${s.enabled ? "Active" : "Off"}</span></td>
-            <td class="text-sm text-muted">${escHtml(s.usage_pool)}</td>
-            <td class="text-sm">${s.credit_cost} credit${s.credit_cost === 1 ? "" : "s"} / ${s.service === "voice" ? "minute" : "message"}</td>
-            ${isOwner ? `<td class="table-actions">
-              <button class="btn btn-ghost btn-sm" onclick="editService('${s.id}', '${s.service}', ${s.credit_cost}, ${s.enabled})">Edit</button>
-            </td>` : ""}
-          </tr>`).join("")}
-        </tbody>
-      </table></div>`;
+  // Services — the 3 channels; seeded rows get real toggles, unseeded (voice) get a preview row
+  const serviceRows = CHANNEL_ORDER.map(ch => {
+    const s = services.find(x => x.service === ch);
+    if (!s) {
+      return `<tr>
+        <td class="font-semibold">${SERVICE_LABELS[ch]}</td>
+        <td class="text-sm">${ch === "voice" ? "10 credits / minute" : "—"}</td>
+        <td><span class="badge badge-blue">seeds with migration</span></td>
+        <td></td>
+      </tr>`;
+    }
+    return `<tr>
+      <td class="font-semibold">${SERVICE_LABELS[ch]}</td>
+      <td class="text-sm">${s.credit_cost} credit${s.credit_cost === 1 ? "" : "s"} / ${ch === "voice" ? "minute" : "message"}</td>
+      <td>
+        <label class="toggle"><input type="checkbox" ${s.enabled ? "checked" : ""}
+          onchange="toggleServiceEnabled('${s.id}', '${ch}', this.checked)"><span class="toggle-slider"></span></label>
+      </td>
+      ${isOwner ? `<td class="table-actions"><button class="btn btn-ghost btn-sm" onclick="editService('${s.id}', '${ch}', ${s.credit_cost})">Rate</button></td>` : "<td></td>"}
+    </tr>`;
+  }).join("");
 
   el.innerHTML = `
     <div class="card mb-4">
-      <div class="card-header"><div class="card-title">Credit Pools</div></div>
-      ${poolsHtml}
+      <div class="card-header"><div class="card-title">Services</div></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Channel</th><th>Burn rate</th><th>Active</th><th></th></tr></thead>
+        <tbody>${serviceRows}</tbody>
+      </table></div>
     </div>
 
     <div class="card mb-4">
-      <div class="card-header"><div class="card-title">Services &amp; Burn Rates</div></div>
-      ${servicesHtml}
+      <div class="card-header"><div class="card-title">Plan &amp; Pricing</div>
+        <span class="badge badge-blue" style="margin-left:auto">UI preview</span>
+      </div>
+      <div class="card-body">
+        <div class="form-row">
+          <div class="form-group">
+            <label>Monthly price (USD)</label>
+            <input type="number" id="bill-price" min="0" step="1" value="${m.price}" />
+            <div class="text-muted" style="font-size:12px;margin-top:4px">
+              One price for whatever services are active. A minimum floor lives in the database — below-floor saves will need an authorized override.
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Renewal term</label>
+            <div class="flex-row">
+              <button class="btn ${m.term === "monthly" ? "btn-primary" : "btn-secondary"} btn-sm" onclick="billingMockField('term', 'monthly')">Monthly</button>
+              <button class="btn ${m.term === "yearly" ? "btn-primary" : "btn-secondary"} btn-sm" onclick="billingMockField('term', 'yearly')">Yearly</button>
+            </div>
+            <div class="text-muted" style="font-size:12px;margin-top:4px">
+              Renews ${org.subscription_end_date ? new Date(org.subscription_end_date).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }) : "—"}
+            </div>
+          </div>
+          ${m.term === "yearly" ? `
+          <div class="form-group">
+            <label>Free months on renewal</label>
+            <input type="number" id="bill-free-months" min="0" max="12" step="1" value="${m.freeMonths}" />
+            <div class="text-muted" style="font-size:12px;margin-top:4px">
+              Charge 12 months, grant 12 + N. Per-role caps come with RBAC.
+            </div>
+          </div>` : ""}
+        </div>
+        <div class="flex-row">
+          <button class="btn btn-primary" onclick="billingSavePlan()">Save plan</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card mb-4">
+      <div class="card-header"><div class="card-title">Credits</div>
+        ${isOwner && pool ? `<button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="editPoolLimit('${pool.id}', ${limit}, ${addon})">Edit allowance</button>` : ""}
+      </div>
+      <div class="card-body">
+        ${suspended ? `<div style="margin-bottom:14px"><span class="badge badge-red">Suspended — all credit buckets exhausted</span>
+          <span class="text-muted" style="font-size:12px;margin-left:8px">Add credits, or the account resumes at the ${resetStr} reset.</span></div>` : ""}
+        <div class="stat-grid" style="margin-bottom:16px">
+          <div class="stat-card">
+            <div class="stat-label">Rollover</div>
+            <div class="stat-value stat-value-md">${rollover.toLocaleString()}</div>
+            <div class="stat-sub">${m.rolloverEnabled ? `leftover monthly from last cycle · dies ${resetStr}` : "off — monthly credits won't carry"}</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Monthly</div>
+            <div class="stat-value stat-value-md">${monthlyLeft.toLocaleString()} <span class="text-muted" style="font-size:13px;font-weight:400">/ ${limit.toLocaleString()}</span></div>
+            <div class="stat-sub">resets ${resetStr} · unused ${m.rolloverEnabled ? "rolls 1 cycle" : "is forfeited"}</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Addon</div>
+            <div class="stat-value stat-value-md">${addon.toLocaleString()}</div>
+            <div class="stat-sub">never expire · burn last</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Available now</div>
+            <div class="stat-value stat-value-md">${available.toLocaleString()}</div>
+            <div class="stat-sub">burn order: rollover → monthly → addon</div>
+          </div>
+        </div>
+        <div class="progress-wrap" style="margin-bottom:14px">
+          <div class="progress-bar" style="height:10px">
+            <div class="progress-fill ${fillClass}" style="width:${pct}%"></div>
+          </div>
+          <span class="progress-label font-semibold">${pct}% of monthly allowance used</span>
+        </div>
+        <div class="toggle-row" style="border-top:1px solid var(--border)">
+          <div>
+            <div class="toggle-label">Rollover</div>
+            <div class="toggle-desc">Unused monthly credits carry into the next cycle only, then expire. When every bucket runs out, the account is suspended.</div>
+          </div>
+          <label class="toggle"><input type="checkbox" ${m.rolloverEnabled ? "checked" : ""}
+            onchange="billingMockField('rolloverEnabled', this.checked)"><span class="toggle-slider"></span></label>
+        </div>
+      </div>
     </div>
 
     <div class="card mb-4">
       <div class="card-header"><div class="card-title">Add Credits</div></div>
       <div class="card-body">
         <p class="text-muted" style="font-size:13px;margin-bottom:12px">
-          Sell a custom credit pack. Addon credits <strong>never expire</strong> — they burn only after the monthly bucket runs out.
+          Sell a custom credit pack. Addon credits <strong>never expire</strong> — they burn only after rollover and monthly buckets run out.
         </p>
         <div class="form-row">
           <div class="form-group">
@@ -3823,13 +3927,6 @@ function renderPaymentsTab(el, org) {
     </div>
 
     <div class="card mb-4">
-      <div class="card-header"><div class="card-title">Payment Options</div></div>
-      <div class="card-body">
-        <div class="payment-options-grid">${presetsHtml}</div>
-      </div>
-    </div>
-
-    <div class="card mb-4">
       <div class="card-header"><div class="card-title">Custom Amount</div></div>
       <div class="card-body">
         <div class="form-row">
@@ -3839,7 +3936,7 @@ function renderPaymentsTab(el, org) {
           </div>
           <div class="form-group">
             <label>Reason</label>
-            <input type="text" id="pay-custom-reason" placeholder="e.g. Custom package, add-on..." />
+            <input type="text" id="pay-custom-reason" placeholder="e.g. Monthly service, custom package..." />
           </div>
         </div>
         <div class="flex-row">
@@ -3870,6 +3967,19 @@ function renderPaymentsTab(el, org) {
   loadPaymentHistory();
 }
 
+async function toggleServiceEnabled(serviceId, service, enabled) {
+  try {
+    await api("update_service", { org_id: currentOrgId, service_id: serviceId, updates: { enabled } });
+    toast(`${SERVICE_LABELS[service] || service} ${enabled ? "activated" : "deactivated"}`, "success");
+    const data = await api("get_org", { org_id: currentOrgId });
+    window._orgData = { ...window._orgData, ...data };
+    renderTab();
+  } catch (e) {
+    toast(e.message, "error");
+    renderTab(); // revert the toggle
+  }
+}
+
 // ── Credit pools & services editing (owner) ──────────────────────────────────
 
 async function editPoolLimit(poolId, currentLimit, currentAddon) {
@@ -3896,21 +4006,19 @@ async function editPoolLimit(poolId, currentLimit, currentAddon) {
   } catch (e) { toast(e.message, "error"); }
 }
 
-async function editService(serviceId, service, currentCost, currentEnabled) {
+async function editService(serviceId, service, currentCost) {
   const costStr = prompt(`Burn rate for ${SERVICE_LABELS[service] || service} (credits per ${service === "voice" ? "minute" : "message"}):`, String(currentCost));
   if (costStr === null) return;
   const creditCost = parseInt(costStr, 10);
   if (!Number.isInteger(creditCost) || creditCost < 1) { toast("Invalid burn rate", "error"); return; }
 
-  const enable = confirm(`${SERVICE_LABELS[service] || service} is currently ${currentEnabled ? "ACTIVE" : "OFF"}.\n\nOK = Active · Cancel = Off`);
-
   try {
     await api("update_service", {
       org_id: currentOrgId,
       service_id: serviceId,
-      updates: { credit_cost: creditCost, enabled: enable },
+      updates: { credit_cost: creditCost },
     });
-    toast("Service updated", "success");
+    toast("Burn rate updated", "success");
     const data = await api("get_org", { org_id: currentOrgId });
     window._orgData = { ...window._orgData, ...data };
     renderTab();
@@ -3951,10 +4059,6 @@ async function sendAddonToDashboard() {
 
 function escAttr(s) {
   return String(s).replace(/'/g, "&#39;").replace(/"/g, "&quot;");
-}
-
-function selectPayment(amount, description, category) {
-  renderPayPalButtons(amount, description, category);
 }
 
 function selectCustomPayment(mode) {

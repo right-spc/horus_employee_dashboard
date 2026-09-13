@@ -2579,17 +2579,6 @@ function renderIntegrationsTab(el, org, integrations, providers) {
         `}
       </div>
     </div>
-    <div class="card" id="calendly-auth-link-card" style="display:none">
-      <div class="card-header"><div class="card-title">Calendly Authorization Link</div></div>
-      <div class="card-body">
-        <p class="text-muted">Open this link to authorize Calendly access:</p>
-        <div style="background:var(--bg-tertiary);padding:12px;border-radius:6px;word-break:break-all;font-size:13px;font-family:monospace" id="calendly-auth-link-display"></div>
-        <div style="display:flex;gap:8px;margin-top:12px">
-          <button class="btn btn-secondary" onclick="copyCalendlyAuthLink()">Copy Link</button>
-          <button class="btn btn-primary" onclick="openCalendlyAuthLink()">Open Link</button>
-        </div>
-      </div>
-    </div>
     <div class="card" style="margin-top:16px">
       <div class="card-header"><div class="card-title">Google Calendar Booking</div></div>
       <div class="card-body" id="gcal-card-body">
@@ -2652,171 +2641,31 @@ function renderIntegrationsTab(el, org, integrations, providers) {
             <button class="btn btn-secondary" id="btn-connect-gcal" onclick="connectGoogleCalendar()">Connect Google Calendar</button>`;
         })()}
       </div>
-    </div>
-    <div class="card" id="gcal-auth-link-card" style="display:none;margin-top:16px">
-      <div class="card-header"><div class="card-title">Google Calendar Authorization Link</div></div>
-      <div class="card-body">
-        <p class="text-muted">Open this link to authorize Google Calendar access:</p>
-        <div style="background:var(--bg-tertiary);padding:12px;border-radius:6px;word-break:break-all;font-size:13px;font-family:monospace" id="gcal-auth-link-display"></div>
-        <div style="display:flex;gap:8px;margin-top:12px">
-          <button class="btn btn-secondary" onclick="copyGcalAuthLink()">Copy Link</button>
-          <button class="btn btn-primary" onclick="openGcalAuthLink()">Open Link</button>
-        </div>
-      </div>
     </div>`;
 
-  // Load calendar dropdown if the card has a select element
-  if (document.getElementById("gcal-calendar-select")) {
-    loadGoogleCalendars();
-  }
+  // Calendar dropdown placeholder (backend being rebuilt)
+  const gcalLoading = document.getElementById("gcal-calendar-loading");
+  if (gcalLoading) gcalLoading.textContent = "Calendar selection is being rebuilt — coming soon.";
 }
 
-async function connectCalendly() {
-  const btn = document.getElementById("btn-connect-calendly");
-  if (btn) {
-    btn.disabled = true;
-    btn.innerHTML = '<div class="spinner" style="width:16px;height:16px;display:inline-block"></div> Generating...';
-  }
-  try {
-    const { url } = await api("get_calendly_auth_link", { org_id: currentOrgId });
-    window._calendlyAuthLink = url;
-    document.getElementById("calendly-auth-link-display").textContent = url;
-    document.getElementById("calendly-auth-link-card").style.display = "";
-    toast("Calendly authorization link generated", "success");
-  } catch (e) {
-    toast(`Failed: ${e.message}`, "error");
-  } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = "Connect Calendly";
-    }
-  }
+function connectCalendly() {
+  comingSoon("Calendly integration");
 }
 
-function copyCalendlyAuthLink() {
-  if (window._calendlyAuthLink) {
-    navigator.clipboard.writeText(window._calendlyAuthLink);
-    toast("Copied to clipboard", "success");
-  }
+function disconnectCalendly() {
+  comingSoon("Calendly integration");
 }
 
-function openCalendlyAuthLink() {
-  if (window._calendlyAuthLink) {
-    window.open(window._calendlyAuthLink, "_blank");
-  }
+function connectGoogleCalendar() {
+  comingSoon("Google Calendar integration");
 }
 
-async function loadGoogleCalendars() {
-  const select = document.getElementById("gcal-calendar-select");
-  const loading = document.getElementById("gcal-calendar-loading");
-  if (!select) return;
-
-  try {
-    const calResult = await api("list_google_calendars", { org_id: currentOrgId });
-    const calendars = calResult.calendars || [];
-
-    // Get current selection from integration or gmail provider
-    const { google_calendar: gcalIntegration, gmail_calendar } = await api("get_google_calendar_status", { org_id: currentOrgId });
-    let selectedId = "";
-    if (gcalIntegration?.config?.selected_calendar_id) {
-      selectedId = gcalIntegration.config.selected_calendar_id;
-    } else if (gmail_calendar?.selected_calendar_id) {
-      selectedId = gmail_calendar.selected_calendar_id;
-    }
-
-    select.innerHTML = '<option value="">Primary Calendar</option>';
-    if (calResult.scope_missing) {
-      if (loading) loading.textContent = "Calendar list unavailable — re-connect Google or connect a separate account to enable selection.";
-      return;
-    }
-    calendars.forEach(cal => {
-      const opt = document.createElement("option");
-      opt.value = cal.id;
-      opt.textContent = cal.summary + (cal.primary ? " (Primary)" : "");
-      if (cal.id === selectedId) opt.selected = true;
-      select.appendChild(opt);
-    });
-
-    if (loading) loading.style.display = "none";
-  } catch (e) {
-    if (loading) loading.textContent = "Could not load calendars";
-    console.error("loadGoogleCalendars error:", e);
-  }
+function disconnectGoogleCalendar() {
+  comingSoon("Google Calendar integration");
 }
 
-async function saveGoogleCalendarSelection() {
-  const select = document.getElementById("gcal-calendar-select");
-  if (!select) return;
-  try {
-    await api("update_google_calendar_selection", {
-      org_id: currentOrgId,
-      calendar_id: select.value || null,
-    });
-    toast("Calendar selection saved", "success");
-  } catch (e) {
-    toast(`Failed: ${e.message}`, "error");
-  }
-}
-
-async function connectGoogleCalendar() {
-  const btn = document.getElementById("btn-connect-gcal");
-  if (btn) {
-    btn.disabled = true;
-    btn.innerHTML = '<div class="spinner" style="width:16px;height:16px;display:inline-block"></div> Generating...';
-  }
-  try {
-    const { url } = await api("get_google_calendar_auth_link", { org_id: currentOrgId });
-    window._gcalAuthLink = url;
-    document.getElementById("gcal-auth-link-display").textContent = url;
-    document.getElementById("gcal-auth-link-card").style.display = "";
-    toast("Google Calendar authorization link generated", "success");
-  } catch (e) {
-    toast(`Failed: ${e.message}`, "error");
-  } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = "Connect Google Calendar";
-    }
-  }
-}
-
-async function disconnectGoogleCalendar() {
-  if (!confirm("Disconnect Google Calendar integration? Bookings will fall back to the Gmail calendar if available.")) return;
-  try {
-    await api("disconnect_google_calendar", { org_id: currentOrgId });
-    toast("Google Calendar disconnected", "success");
-    const data = await api("get_org", { org_id: currentOrgId });
-    window._orgData = { ...window._orgData, ...data };
-    renderTab();
-  } catch (e) {
-    toast(`Failed: ${e.message}`, "error");
-  }
-}
-
-function copyGcalAuthLink() {
-  if (window._gcalAuthLink) {
-    navigator.clipboard.writeText(window._gcalAuthLink);
-    toast("Copied to clipboard", "success");
-  }
-}
-
-function openGcalAuthLink() {
-  if (window._gcalAuthLink) {
-    window.open(window._gcalAuthLink, "_blank");
-  }
-}
-
-async function disconnectCalendly() {
-  if (!confirm("Disconnect Calendly? The AI will fall back to sharing the manual booking link.")) return;
-  try {
-    await api("disconnect_calendly", { org_id: currentOrgId });
-    toast("Calendly disconnected", "success");
-    const data = await api("get_org", { org_id: currentOrgId });
-    window._orgData = { ...window._orgData, ...data };
-    renderTab();
-  } catch (e) {
-    toast(`Failed: ${e.message}`, "error");
-  }
+function saveGoogleCalendarSelection() {
+  comingSoon("Google Calendar integration");
 }
 
 // ── Settings Tab ─────────────────────────────────────────────────────────────
@@ -4157,6 +4006,12 @@ function filterTableRows(inputId, tbodyId, emptyMsgId) {
 
 // ── Team Management (owner only) ─────────────────────────────────────────────
 
+// Stub for features whose backend is being rebuilt (Team page, Calendly,
+// Google Calendar). The UI stays in place; actions explain instead of erroring.
+function comingSoon(feature) {
+  toast(`${feature} is being rebuilt — coming soon.`, "default");
+}
+
 async function renderTeamPage(main) {
   main.innerHTML = `
     <div class="page-header">
@@ -4167,61 +4022,9 @@ async function renderTeamPage(main) {
     </div>
     <div class="card">
       <div class="card-body" id="team-list-container">
-        <div class="loading-overlay"><div class="spinner"></div> Loading...</div>
+        <div class="empty-state"><p>Team management is being rebuilt — check back soon.</p></div>
       </div>
     </div>`;
-  await loadTeamList();
-}
-
-async function loadTeamList() {
-  const container = document.getElementById("team-list-container");
-  try {
-    const { team } = await api("list_team");
-    window._teamCache = {};
-    for (const m of team || []) window._teamCache[m.id] = m;
-    if (!team || team.length === 0) {
-      container.innerHTML = `<p class="text-muted" style="padding:24px;text-align:center">No team members yet.</p>`;
-      return;
-    }
-    container.innerHTML = `
-      <table style="width:100%">
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Email</th>
-            <th>Role</th>
-            <th>Status</th>
-            <th style="text-align:right">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${team.map(m => {
-            const isSelf = m.id === dashUser.id;
-            const statusBadge = m.is_active
-              ? `<span class="badge badge-green">Active</span>`
-              : `<span class="badge badge-gray">Inactive</span>`;
-            const roleBadge = m.role === "owner"
-              ? `<span class="badge badge-cyan">Admin</span>`
-              : m.role === "teamleader"
-              ? `<span class="badge badge-blue">Team Leader</span>`
-              : `<span class="badge">Salesperson</span>`;
-            return `<tr>
-              <td><strong>${escHtml(m.display_name)}</strong>${isSelf ? ' <span style="color:var(--text-muted);font-size:11px">(you)</span>' : ""}</td>
-              <td style="color:var(--text-muted)">${escHtml(m.email)}</td>
-              <td>${roleBadge}</td>
-              <td>${statusBadge}</td>
-              <td style="text-align:right">
-                <button class="btn btn-ghost btn-sm" onclick="showEditTeamMemberModal('${m.id}')">Edit</button>
-                ${!isSelf ? `<button class="btn btn-ghost btn-sm" style="color:${m.is_active ? "var(--danger)" : "var(--success)"}" onclick="toggleTeamMember('${m.id}', ${!m.is_active})">${m.is_active ? "Deactivate" : "Reactivate"}</button>
-                <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="deleteTeamMember('${m.id}')">Delete</button>` : ""}
-              </td>
-            </tr>`;
-          }).join("")}
-        </tbody>
-      </table>`;
-  } catch (e) {
-    container.innerHTML = `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
-  }
 }
 
 function showAddTeamMemberModal() {
@@ -4263,116 +4066,8 @@ function showAddTeamMemberModal() {
   emailInput.focus();
 }
 
-async function submitAddTeamMember() {
-  const email = document.getElementById("new-member-email").value.trim();
-  const displayName = document.getElementById("new-member-name").value.trim();
-  const role = document.getElementById("new-member-role").value;
-  const errEl = document.getElementById("add-member-error");
-  const btn = document.getElementById("add-member-submit");
-
-  errEl.innerHTML = "";
-  if (!email || !displayName) {
-    errEl.innerHTML = `<div class="alert alert-danger">Email and display name are required.</div>`;
-    return;
-  }
-
-  btn.disabled = true;
-  btn.textContent = "Adding...";
-  try {
-    await api("add_team_member", { email, display_name: displayName, role });
-    document.querySelector(".modal-backdrop")?.remove();
-    toast("Team member added", "success");
-    await loadTeamList();
-  } catch (e) {
-    errEl.innerHTML = `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
-    btn.disabled = false;
-    btn.textContent = "Add Member";
-  }
-}
-
-function showEditTeamMemberModal(memberId) {
-  const member = window._teamCache?.[memberId];
-  if (!member) return;
-  const modal = document.createElement("div");
-  modal.className = "modal-backdrop";
-  modal.innerHTML = `
-    <div class="modal">
-      <div class="modal-header">
-        <h3>Edit Team Member</h3>
-        <button class="btn btn-ghost btn-sm" onclick="this.closest('.modal-backdrop').remove()">&times;</button>
-      </div>
-      <div class="modal-body">
-        <div id="edit-member-error"></div>
-        <div class="form-group">
-          <label>Display Name</label>
-          <input type="text" id="edit-member-name" value="${escHtml(member.display_name)}" />
-        </div>
-        <div class="form-group">
-          <label>Role</label>
-          <select id="edit-member-role">
-            <option value="salesperson" ${member.role === "salesperson" ? "selected" : ""}>Salesperson</option>
-            <option value="teamleader" ${member.role === "teamleader" ? "selected" : ""}>Team Leader</option>
-            <option value="owner" ${member.role === "owner" ? "selected" : ""}>Admin</option>
-          </select>
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn btn-secondary" onclick="this.closest('.modal-backdrop').remove()">Cancel</button>
-        <button class="btn btn-primary" id="edit-member-submit" onclick="submitEditTeamMember('${member.id}')">Save</button>
-      </div>
-    </div>`;
-  document.body.appendChild(modal);
-}
-
-async function submitEditTeamMember(userId) {
-  const displayName = document.getElementById("edit-member-name").value.trim();
-  const role = document.getElementById("edit-member-role").value;
-  const errEl = document.getElementById("edit-member-error");
-  const btn = document.getElementById("edit-member-submit");
-
-  errEl.innerHTML = "";
-  btn.disabled = true;
-  btn.textContent = "Saving...";
-  try {
-    await api("update_team_member", { user_id: userId, updates: { display_name: displayName, role } });
-    document.querySelector(".modal-backdrop")?.remove();
-    toast("Team member updated", "success");
-    if (userId === dashUser.id) {
-      dashUser.display_name = displayName;
-      dashUser.role = role;
-      isOwner = role === "owner";
-      updateSidebarUser(displayName, role);
-    }
-    await loadTeamList();
-  } catch (e) {
-    errEl.innerHTML = `<div class="alert alert-danger">${escHtml(e.message)}</div>`;
-    btn.disabled = false;
-    btn.textContent = "Save";
-  }
-}
-
-async function toggleTeamMember(userId, activate) {
-  const action = activate ? "reactivate" : "deactivate";
-  if (!confirm(`Are you sure you want to ${action} this team member?`)) return;
-  try {
-    await api("update_team_member", { user_id: userId, updates: { is_active: activate } });
-    toast(`Team member ${action}d`, "success");
-    await loadTeamList();
-  } catch (e) {
-    toast(e.message, "error");
-  }
-}
-
-async function deleteTeamMember(userId) {
-  const name = window._teamCache?.[userId]?.display_name || "this member";
-  if (!confirm(`Permanently delete ${name}? This removes their account entirely and cannot be undone.`)) return;
-  try {
-    await api("delete_team_member", { user_id: userId });
-    toast("Team member deleted", "success");
-    await loadTeamList();
-  } catch (e) {
-    toast(e.message, "error");
-  }
+function submitAddTeamMember() {
+  comingSoon("Team management");
 }
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────

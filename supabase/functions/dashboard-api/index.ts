@@ -520,7 +520,6 @@
               name, slug,
               ai_tone: ai_tone || "professional",
               message_limit_per_month: limit,
-              monthly_credits_remaining: limit,
               auto_send_min_confidence: auto_send_min_confidence || 0.75,
               subscription_tier: subscription_tier || "basic",
               subscription_plan: plan,
@@ -580,9 +579,6 @@
             delete updates.subscription_start_date;
             delete updates.subscription_end_date;
             delete updates.billing_day_of_month;
-            delete updates.rollover_credits;
-            delete updates.monthly_credits_remaining;
-            delete updates.addon_credits;
             delete updates.auto_send_min_confidence;
             delete updates.retention_days;
 
@@ -782,85 +778,6 @@
           const data = await res.json();
           if (!res.ok) throw new Error(data.error || data.message || `Auth function returned HTTP ${res.status}`);
           return ok({ url: data.url });
-        }
-
-        // ── KB ingest (proxied to kb-ingest, which creates a new KB version) ──
-        case "kb_ingest": {
-          const { org_id, ...payload } = body as Record<string, unknown>;
-          if (!org_id) return err("Missing org_id", 400);
-
-          await assertOrgAccess(adminClient, dashUser, org_id as string);
-
-          const res = await fetch(`${SUPA_URL}/functions/v1/kb-ingest`, {
-            method: "POST",
-            headers: {
-              "Authorization": `Bearer ${SUPA_SERVICE_KEY}`,
-              "x-internal-secret": Deno.env.get("INTERNAL_API_SECRET") ?? "",
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              ...payload,
-              organization_id: org_id,
-              source: "dashboard",
-              created_by: dashUser.id,
-              created_by_name: dashUser.display_name,
-            }),
-          });
-
-          const responseText = await res.text();
-          console.log("kb-ingest response:", res.status, responseText);
-          if (!res.ok) {
-            let errorMsg = "KB ingest failed";
-            try { errorMsg = JSON.parse(responseText).error || JSON.parse(responseText).msg || responseText; } catch { errorMsg = responseText || errorMsg; }
-            throw new Error(errorMsg);
-          }
-          const data = JSON.parse(responseText);
-          return ok(data);
-        }
-
-        // ── Delete KB document ──────────────────────────────────────────────
-        case "delete_kb_doc": {
-          const { org_id, doc_id } = body;
-          if (!org_id || !doc_id) return err("Missing org_id or doc_id", 400);
-
-          await assertOrgAccess(adminClient, dashUser, org_id as string);
-
-          // Versioned KB rows are immutable history — they cannot be deleted.
-          const { data: versionRow } = await adminClient
-            .schema("kb").from("kb_versions")
-            .select("id")
-            .eq("id", doc_id)
-            .maybeSingle();
-          if (versionRow) {
-            return err("The versioned knowledge base cannot be deleted — edit it (creates a new version) or roll back to a previous version instead.", 400);
-          }
-
-          return err("Legacy KB documents were retired in the versioned-KB migration — nothing to delete.", 400);
-        }
-
-        // ── Get KB content (legacy shape, kept for compatibility) ───────────
-        // doc_id is the KB VERSION id. Sections are returned chunk-shaped.
-        case "get_kb_chunks": {
-          const { org_id, doc_id } = body;
-          if (!org_id || !doc_id) return err("Missing org_id or doc_id", 400);
-
-          await assertOrgAccess(adminClient, dashUser, org_id as string);
-
-          const { data: version, error } = await adminClient
-            .schema("kb").from("kb_versions")
-            .select("id, sections")
-            .eq("id", doc_id)
-            .eq("organization_id", org_id)
-            .single();
-
-          if (error || !version) return err("KB version not found", 404);
-
-          const sections = (version.sections as Array<{ title?: string; body?: string }>) || [];
-          const chunks = sections.map((s, i) => ({
-            content: s.title ? `## ${s.title}\n\n${s.body ?? ""}` : (s.body ?? ""),
-            chunk_index: i,
-          }));
-          return ok({ chunks });
         }
 
         // ── List KB versions (history) ──────────────────────────────────────
@@ -1465,7 +1382,6 @@
               name, slug,
               ai_tone: ai_tone || "professional",
               message_limit_per_month: demoLimit,
-              monthly_credits_remaining: demoLimit,
               billing_day_of_month: demoBillingDay,
               auto_send_min_confidence: auto_send_min_confidence || 0.75,
               subscription_tier: subscription_tier || "basic",

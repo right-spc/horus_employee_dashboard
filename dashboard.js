@@ -931,7 +931,7 @@ async function renderTab() {
   try {
     if (currentTab === "overview") renderOverviewTab(el, org, providers, widget, lastPayment, conversationStats, client, kbDocs, notes);
     else if (currentTab === "channels") renderChannelsTab(el, org, providers, widget);
-    else if (currentTab === "kb") renderKbTab(el, kbDocs, org);
+    else if (currentTab === "kb") renderKbTab(el, org);
     else if (currentTab === "integrations") renderIntegrationsTab(el, org, integrations, providers);
     else if (currentTab === "payments") renderPaymentsTab(el, org);
     else if (currentTab === "reports") renderReportsTab(el, org);
@@ -1839,7 +1839,7 @@ let currentKbSection = "personality";
 let _kb = null; // { orgId, sections, dirty, activeVersionNum, versions, requests, biz?, bizOrgId? }
 let _kbHoursMode = "custom"; // custom | 24_7 | none — selected mode in Business Details
 
-async function renderKbTab(el, kbDocs, org) {
+async function renderKbTab(el, org) {
   el.innerHTML = `<div class="card"><div class="loading-overlay"><div class="spinner"></div> Loading...</div></div>`;
   try {
     const [{ versions }, { requests }] = await Promise.all([
@@ -2243,7 +2243,7 @@ function kbKnowledgeHtml() {
         </div>
         <div class="flex-row">
           <button class="btn btn-primary" id="kb-save-btn" onclick="kbSaveVersion()">Save as New Version</button>
-          <button class="btn btn-secondary" onclick="renderKbTab(document.getElementById('tab-content'), null, window._orgData.org)">Discard Changes</button>
+          <button class="btn btn-secondary" onclick="renderKbTab(document.getElementById('tab-content'), window._orgData.org)">Discard Changes</button>
         </div>
       </div>
     </div>
@@ -2405,7 +2405,7 @@ async function kbSaveVersion() {
 async function kbRefresh() {
   const data = await api("get_org", { org_id: currentOrgId });
   window._orgData = data;
-  renderKbTab(document.getElementById("tab-content"), null, data.org);
+  renderKbTab(document.getElementById("tab-content"), data.org);
 }
 
 // ── Version history ───────────────────────────────────────────────────────────
@@ -2907,10 +2907,6 @@ function renderSettingsTab(el, org) {
         ${isOwner ? `
         <div class="form-row">
           <div class="form-group">
-            <label>Monthly Message Limit</label>
-            <input type="number" id="s-limit" value="${org.message_limit_per_month}" min="100" />
-          </div>
-          <div class="form-group">
             <label>Payment Due Day</label>
             <select id="s-billing-day">
               ${Array.from({length: 28}, (_, i) => i + 1).map(d =>
@@ -2992,7 +2988,6 @@ async function saveOrgSettings() {
   if (isOwner) {
     updates.auto_send_min_confidence = parseFloat(document.getElementById("s-confidence").value);
     updates.retention_days = parseInt(document.getElementById("s-retention").value, 10);
-    updates.message_limit_per_month = parseInt(document.getElementById("s-limit").value);
     updates.billing_day_of_month = parseInt(document.getElementById("s-billing-day").value);
     const startVal = document.getElementById("s-start-date").value;
     const endVal = document.getElementById("s-end-date").value;

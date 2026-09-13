@@ -1,6 +1,6 @@
 # Horus Desk — Status & Roadmap
 
-> Last updated: **2026-09-11** · Branch state: `redesign` = KB redo + tone field + **credit pools** (unreleased), `main` = `f73b1c2` (production)
+> Last updated: **2026-09-11** · Branch state: `redesign` = KB redo + tone field + credit pools + **hygiene cleanup** (unreleased), `main` = `f73b1c2` (production)
 > This is the single reference for what's shipped, what's pending, and how we work. Related docs: `voice-channel-plan.md` (approved, not started), `client-rbac-plan.md` (§5 = KB versioning model).
 
 ---
@@ -44,6 +44,15 @@
 - **dashboard-api**: `get_org` returns `pools` + `services`; new owner-only `update_pool` / `update_service`; `create_org` accepts a services picker (webchat/email, voice/sms "soon") and seeds pool+services; `create_demo` seeds both; `reset_usage` resets pools; customer-api invoice capture applies `credits_added` to the pool.
 - **Overview bar** reads from the pool (+ addon balance shown); phantom `cycle_anchor_day` fallback removed.
 
+### Hygiene cleanup (migration `20260916000000_hygiene_cleanup.sql`)
+- **DB dropped** (verified zero callers/zero data first): legacy RPCs `increment_message_usage`, `is_usage_exceeded`, `reset_monthly_usage_for_day`; org columns `rollover_credits`, `monthly_credits_remaining`, `addon_credits`, `usage_reset_date`.
+- **Cron renamed**: the every-minute `test` job was actually the delivery-queue pump → now `process-delivery-queue` (unschedule+schedule; pg_cron predates `alter_job(jobname)`).
+- **dashboard-api**: removed dead action cases `kb_ingest` / `delete_kb_doc` / `get_kb_chunks` (kb-ingest FUNCTION still live — reset_demo calls it via HTTP); legacy column writes/blacklist entries removed.
+- **widget-chat**: removed orphaned `debug_skip_kb` / `debug_reasoning_effort` test-mode toggles (nothing sent them).
+- **dashboard.js**: dropped unused `kbDocs` param on `renderKbTab`; removed Settings "Monthly Message Limit" field (edited the legacy column — the Billing tab pool edit is the real one now).
+- **CSS**: removed 4 unused classes. **scripts/**: deleted scratch `kb-tab-new.js` + 4 one-off SQL helpers (kept `run-migration.mjs`, `verify-live-kb.mjs`).
+- **Verified NOT dead (kept)**: handle-inbound-email auto-send block (`auto_send_enabled` is `true` on ALL 14 orgs — the deferred-cleanup note was wrong), `subscription_tier` (decorative but visible), `billing.credit_cycle_history` (audit trail), kbDocs shim (gates test-chat mount + overview stat), all 19 edge functions.
+
 ### Schema facts learned this phase
 - Business tables live in `business` schema; `core.business_*` are security-invoker bridge views (writes through them verified).
 - `business_hours`: `UNIQUE(organization_id, day_of_week, open_time)`, `CHECK (is_open → times required)`; one slot per day (no split shifts — would need schema + prompt change).
@@ -57,12 +66,13 @@
 - See `voice-channel-plan.md` (approved; note: it references the DROPPED `kb.kb_chunks` and the old tab layout — needs a refresh pass before building). Voice usage will be a service row (`credit_cost` per minute) burning the shared pool — the plumbing is now in place. `messaging.conversations.channel` CHECK still lacks `'voice'` — alter in the voice migration.
 
 ### 🟡 Smaller gaps
+- **⚠️ BROKEN features (found in hygiene pass):** the Team page (`list_team`, `add_team_member`, `update_team_member`, `delete_team_member`) and Integrations tab Calendly/Google Calendar actions (`get_calendly_auth_link`, `disconnect_calendly`, `list_google_calendars`, `get_google_calendar_status`, `update_google_calendar_selection`, `get_google_calendar_auth_link`, `disconnect_google_calendar`) call dashboard-api actions that exist NOWHERE in the repo (never existed in git history) — they fail at runtime. Owner decision needed: implement or strip.
 - **Business staff editor** — `business_staff` has no UI; fits as a card in KB → Business Details.
 - **MS Graph webhook** — `handle-inbound-email` answers validationToken but has no change-notification processing path (Outlook inbound not flowing).
 - **Voice/SMS channel** — see `voice-channel-plan.md` (approved; note: it references the DROPPED `kb.kb_chunks` and the old tab layout — needs a refresh pass before building).
 
 ### ⚪ Deferred cleanup (owner decides at end)
-- Legacy credit columns now write-mostly: `rollover_credits`, `monthly_credits_remaining`, org-level `addon_credits`, plus legacy RPCs `increment_message_usage` / `is_usage_exceeded` / `reset_monthly_usage_for_day` — drop after the pool model proves out. Also: `usage_reset_date` (stale), `subscription_tier`, `auto_send_enabled`/`auto_send_min_confidence` + dead auto-send block in handle-inbound-email.
+- `subscription_tier` (decorative; removal = UI + sales-report changes) and the auto-send pair `auto_send_enabled`/`auto_send_min_confidence` (LIVE for all orgs — removal would change email behavior; needs a product decision, not a cleanup).
 - Test data on HD org (disclaimer sample, placeholder logo).
 
 ### 🚀 Release pending

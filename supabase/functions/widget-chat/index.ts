@@ -1250,13 +1250,7 @@ async function handleTestChat(
     return errorResponse("Organization not found", 404, "*");
   }
 
-  // Diagnostics (test mode only): debug_skip_kb measures the latency floor
-  // without the 8K-token KB prefill; debug_reasoning_effort overrides the
-  // reasoning level to isolate the model's hidden thinking phase.
-  const kbChunks = body.debug_skip_kb === true ? [] : await loadAllKbChunks(supabase, orgId);
-  const reasoningEffort = typeof body.debug_reasoning_effort === "string"
-    ? body.debug_reasoning_effort
-    : REASONING_EFFORT;
+  const kbChunks = await loadAllKbChunks(supabase, orgId);
 
   const systemPrompt = buildSystemPrompt({
     org,
@@ -1280,14 +1274,14 @@ async function handleTestChat(
   // Streaming variant (body.stream === true): SSE reply instead of buffered
   // JSON. Same pipeline and guarantees — see streamTestChatResponse.
   if (body.stream === true) {
-    return streamTestChatResponse(kimiMessages, reasoningEffort);
+    return streamTestChatResponse(kimiMessages);
   }
 
   const kimiT0 = Date.now();
   const kimiResponse = await callKimiWithRetry({
     model: KIMI_MODEL,
     max_tokens: 2000,
-    reasoning_effort: reasoningEffort,
+    reasoning_effort: REASONING_EFFORT,
     messages: kimiMessages,
     tools: [SUBMIT_RESPONSE_TOOL],
     tool_choice: "required",

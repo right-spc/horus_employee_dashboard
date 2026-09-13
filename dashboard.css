@@ -80,13 +80,9 @@ body {
 .font-mono { font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; }
 .mb-4 { margin-bottom: 20px; }
 .flex-row { display: flex; align-items: center; gap: 8px; }
-.flex-row-spread { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .org-link { font-weight: 600; color: var(--primary); cursor: pointer; text-decoration: none; transition: color 0.15s var(--ease); }
 .org-link:hover { color: var(--primary-hover); }
-.card-body-flush { padding: 0; }
-.stat-value-sm { font-size: 14px; margin-top: 8px; }
 .stat-value-md { font-size: 18px; margin-top: 8px; }
-.stat-value-lg { font-size: 16px; margin-top: 8px; }
 
 /* ── Layout ───────────────────────────────── */
 

@@ -1223,17 +1223,17 @@ function openAuthLink() {
   }
 }
 
-// ── Voice Tab (UI SHELL — backend wiring comes with the voice channel build) ──
-// Everything here runs on session-local mock state (_voiceMock) so the design
-// can be reviewed end-to-end. Saves and provisioning are preview-only and
-// reset on reload. See docs/voice-channel-plan.md Phase 2.
-
+// ── Voice Tab ─────────────────────────────────────────────────────────────────
+// Fully wired to dashboard-api: get_voice (config + active number + aggregate
+// usage), update_voice_config, search_available_numbers / order_phone_number /
+// release_phone_number. Privacy rule: employees see AGGREGATES ONLY — caller
+// numbers, recordings and transcripts never leave the gateway.
+//
 // Real Telnyx Ultra voices (natural tier, marketed for live voice-AI agents).
 // Shortlist curated by owner via REAL test calls (Phase 0, 2026-09-13): Cindy,
 // Kendra and Morgan rejected — heteronym stumbles ("live"→"leave" etc.). These 5 passed.
-// IDs are the actual catalog IDs — these carry straight through to wiring.
-// Preview clips were generated once via the Telnyx TTS API and ship as static
-// assets in public/voice-previews/ (org-agnostic sample line).
+// `telnyx` is the full catalog ID stored in voice.configs.tts_voice; the short
+// `id` is only for the picker UI + preview clips (public/voice-previews/).
 const VOICE_OPTIONS = [
   { id: "rachel", name: "Rachel", desc: "Polished, professional female",                    telnyx: "Telnyx.Ultra.10bd4af4-825b-49b8-b8bd-0ca11865536e" },
   { id: "amber",  name: "Amber",  desc: "Warm, welcoming female",                           telnyx: "Telnyx.Ultra.a7a59115-2425-4192-844c-1e98ec7d6877" },
@@ -1242,36 +1242,104 @@ const VOICE_OPTIONS = [
   { id: "chase",  name: "Chase",  desc: "Steady, helpful male",                             telnyx: "Telnyx.Ultra.59cb0f89-5d66-49f8-b965-f72b252789e0" },
 ];
 
-let _voiceMock = null; // per-org mock state, built by voiceMockState()
+// Session-local cache of get_voice for the org on screen. Shape:
+// { orgId, loading } → { orgId, config, number, usage } | { orgId, error }.
+let _voiceData = null;
+// Local pill state for the Escalation card (only persisted on Save).
+let _voicePills = null; // { orgId, fallbackMode, afterHours }
 
-function voiceMockState(orgId) {
-  if (_voiceMock && _voiceMock.orgId === orgId) return _voiceMock;
-  _voiceMock = {
-    orgId,
-    number: null,              // null = no number provisioned yet
-    enabled: false,
-    voice: "rachel",
-    greeting: "Thank you for calling! How can I help you today?",
-    transferEnabled: false,
-    transferNumber: "",
-    fallbackMode: "voicemail", // forward | voicemail
-    fallbackNumber: "",
-    voicemailGreeting: "Sorry, we're unable to take your call right now. Please leave a message after the tone.",
-    afterHours: "fallback",    // answer | fallback
-  };
-  return _voiceMock;
+async function loadVoiceData(orgId) {
+  _voiceData = { orgId, loading: true };
+  try {
+    const d = await api("get_voice", { org_id: orgId });
+    _voiceData = { orgId, config: d.config, number: d.number, usage: d.usage };
+  } catch (e) {
+    _voiceData = { orgId, error: e.message || "Failed to load voice settings" };
+  }
+  // Re-render only if the user is still on this org's voice tab.
+  if (currentChannel === "voice" && !currentIsDemo && window._orgData?.org?.id === orgId) {
+    const panel = document.getElementById("channel-panel");
+    if (panel) renderVoiceTab(panel, window._orgData.org);
+  }
 }
 
-function voicePreviewToast() {
-  toast("UI preview — the voice backend isn't wired yet, nothing was saved.", "default");
+const VOICE_DEFAULT_GREETING = "Thank you for calling! How can I help you today?";
+const VOICE_DEFAULT_VOICEMAIL = "Sorry, we're unable to take your call right now. Please leave a message after the tone.";
+
+// Config with column defaults (covers orgs whose stub row is missing).
+function voiceCfg() {
+  return _voiceData?.config || {
+    enabled: false,
+    tts_voice: VOICE_OPTIONS[0].telnyx,
+    greeting_text: VOICE_DEFAULT_GREETING,
+    transfer_enabled: false,
+    transfer_number: null,
+    fallback_mode: "voicemail",
+    fallback_number: null,
+    voicemail_greeting: VOICE_DEFAULT_VOICEMAIL,
+    after_hours_mode: "fallback",
+    telnyx_assistant_id: null,
+  };
+}
+
+function fmtUsNumber(e164) {
+  const d = String(e164 || "").replace(/^\+1/, "");
+  return d.length === 10 ? `+1 (${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : String(e164 || "");
+}
+
+function fmtDuration(totalSeconds) {
+  const s = Math.round(totalSeconds || 0);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+function rerenderVoiceTab() {
+  const panel = document.getElementById("channel-panel");
+  if (panel && currentChannel === "voice" && window._orgData?.org) renderVoiceTab(panel, window._orgData.org);
+}
+
+// Single save path for all voice config writes — updates the cache from the
+// server's returned row so the UI always reflects what's actually stored.
+async function voiceSaveConfig(updates, successMsg) {
+  try {
+    const d = await api("update_voice_config", { org_id: currentOrgId, updates });
+    if (_voiceData?.orgId === currentOrgId) _voiceData.config = d.config;
+    if (_voicePills?.orgId === currentOrgId) {
+      _voicePills.fallbackMode = d.config.fallback_mode;
+      _voicePills.afterHours = d.config.after_hours_mode;
+    }
+    if (successMsg) toast(successMsg, "success");
+    return true;
+  } catch (e) {
+    toast(e.message, "error");
+    return false;
+  }
 }
 
 function renderVoiceTab(el, org) {
-  const v = voiceMockState(org.id);
+  if (!_voiceData || _voiceData.orgId !== org.id || _voiceData.loading) {
+    el.innerHTML = `<div class="card"><div class="card-body" style="padding:48px;text-align:center"><p class="text-muted">Loading voice settings…</p></div></div>`;
+    if (!_voiceData || _voiceData.orgId !== org.id) loadVoiceData(org.id);
+    return;
+  }
+  if (_voiceData.error) {
+    el.innerHTML = `<div class="card"><div class="card-body">
+      <div class="alert alert-danger" style="margin-bottom:14px">${escHtml(_voiceData.error)}</div>
+      <button class="btn btn-secondary" onclick="loadVoiceData('${org.id}')">Retry</button>
+    </div></div>`;
+    return;
+  }
 
-  const syncBadge = v.number
-    ? `<span class="badge badge-yellow">Not connected</span>`
-    : `<span class="badge badge-gray">No number</span>`;
+  const v = voiceCfg();
+  const num = _voiceData.number;
+  const usage = _voiceData.usage || { callsAnswered: 0, totalMinutes: 0, avgSeconds: null, creditsBurned: 0 };
+  if (!_voicePills || _voicePills.orgId !== org.id) {
+    _voicePills = { orgId: org.id, fallbackMode: v.fallback_mode, afterHours: v.after_hours_mode };
+  }
+
+  const assistantBadge = v.telnyx_assistant_id
+    ? `<span class="badge badge-green">Synced</span>`
+    : `<span class="badge badge-yellow">Not synced</span>`;
+  const caps = (num?.capabilities || []).map(c => String(c)[0].toUpperCase() + String(c).slice(1));
 
   el.innerHTML = `
     <div class="card mb-4">
@@ -1280,23 +1348,22 @@ function renderVoiceTab(el, org) {
           <div class="toggle-label">Voice AI Receptionist</div>
           <div class="toggle-desc">
             <span class="badge ${v.enabled ? "badge-green" : "badge-gray"}">${v.enabled ? "Enabled" : "Disabled"}</span>
-            · Assistant: ${syncBadge}
-            · <strong>0</strong> min this cycle (<a href="#" onclick="event.preventDefault();switchTab('payments')" style="color:var(--primary)">Billing</a>)
+            · Assistant: ${assistantBadge}
+            · <strong>${usage.totalMinutes}</strong> min this cycle (<a href="#" onclick="event.preventDefault();switchTab('payments')" style="color:var(--primary)">Billing</a>)
           </div>
         </div>
-        <span class="badge badge-blue" style="margin-left:auto">UI preview</span>
       </div>
     </div>
 
     <div class="card mb-4">
       <div class="card-header"><div class="card-title">Phone Number</div></div>
       <div class="card-body">
-        ${v.number ? `
+        ${num ? `
           <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px">
-            <div style="font-size:20px;font-weight:700;letter-spacing:0.5px">${escHtml(v.number)}</div>
-            <button class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText('${v.number}');toast('Copied','success')">Copy</button>
-            <span class="badge badge-green">Voice</span>
-            <span class="badge badge-gray">SMS</span>
+            <div style="font-size:20px;font-weight:700;letter-spacing:0.5px">${escHtml(fmtUsNumber(num.phone_number))}</div>
+            <button class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText('${escAttr(num.phone_number)}');toast('Copied','success')">Copy</button>
+            ${caps.map(c => `<span class="badge ${c === "Voice" ? "badge-green" : "badge-gray"}">${escHtml(c)}</span>`).join("")}
+            ${num.status !== "active" ? `<span class="badge badge-yellow">${escHtml(num.status)}</span>` : ""}
           </div>
           <p class="text-muted" style="font-size:13px;margin-bottom:12px">
             Customers call this number to reach the AI receptionist. Included in the voice package.
@@ -1305,7 +1372,7 @@ function renderVoiceTab(el, org) {
         ` : `
           <p class="text-muted" style="margin-bottom:16px">
             Get a real US phone number for this account. When customers call, the AI receptionist answers,
-            responds from the knowledge base, and can book appointments. Included in the voice package — no per-number fees.
+            responds from the knowledge base, and can book appointments.
           </p>
           <button class="btn btn-primary" onclick="showVoiceNumberModal()">${ICONS.plus} Get a Phone Number</button>
         `}
@@ -1321,32 +1388,21 @@ function renderVoiceTab(el, org) {
             <div class="toggle-desc">When off, calls go straight to the fallback below</div>
           </div>
           <label class="toggle">
-            <input type="checkbox" id="v-enabled" ${v.enabled ? "checked" : ""} onchange="voiceMockField('enabled', this.checked)">
+            <input type="checkbox" id="v-enabled" ${v.enabled ? "checked" : ""} onchange="voiceSetEnabled(this.checked)">
             <span class="toggle-slider"></span>
           </label>
         </div>
 
         <div class="form-group" style="margin-top:16px">
           <label>Voice</label>
-          <div id="v-voice-list">
-            ${VOICE_OPTIONS.map(o => `
-              <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border:1px solid ${v.voice === o.id ? "var(--primary)" : "var(--border)"};border-radius:8px;margin-bottom:6px;cursor:pointer;${v.voice === o.id ? "background:rgba(59,130,246,0.08)" : ""}"
-                   onclick="voiceMockField('voice','${o.id}')">
-                <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();previewVoice('${o.id}')" title="Preview">▶</button>
-                <div style="flex:1">
-                  <div style="font-weight:600;font-size:14px">${o.name}</div>
-                  <div class="text-muted" style="font-size:12px">${o.desc}</div>
-                </div>
-                ${v.voice === o.id ? `<span class="badge badge-blue">Selected</span>` : ""}
-              </div>`).join("")}
-          </div>
+          <div id="v-voice-list">${voiceListHtml(v.tts_voice)}</div>
         </div>
 
         <div class="form-group">
           <label>Greeting <span class="hint">(the first thing callers hear)</span></label>
           <textarea id="v-greeting" rows="2" maxlength="300"
-            oninput="document.getElementById('v-greeting-count').textContent = this.value.length + ' / 300'">${escHtml(v.greeting)}</textarea>
-          <div class="form-hint"><span id="v-greeting-count">${v.greeting.length} / 300</span></div>
+            oninput="document.getElementById('v-greeting-count').textContent = this.value.length + ' / 300'">${escHtml(v.greeting_text)}</textarea>
+          <div class="form-hint"><span id="v-greeting-count">${(v.greeting_text || "").length} / 300</span></div>
         </div>
         <button class="btn btn-primary" onclick="voiceSaveReceptionist()">Save Receptionist Settings</button>
       </div>
@@ -1361,37 +1417,37 @@ function renderVoiceTab(el, org) {
             <div class="toggle-desc">The AI can offer to transfer the caller to a human. If nobody picks up, the AI takes the call back and takes a message.</div>
           </div>
           <label class="toggle">
-            <input type="checkbox" id="v-transfer-enabled" ${v.transferEnabled ? "checked" : ""} onchange="voiceMockField('transferEnabled', this.checked)">
+            <input type="checkbox" id="v-transfer-enabled" ${v.transfer_enabled ? "checked" : ""} onchange="document.getElementById('v-transfer-number-wrap').style.display = this.checked ? '' : 'none'">
             <span class="toggle-slider"></span>
           </label>
         </div>
-        <div class="form-group" id="v-transfer-number-wrap" style="max-width:320px;display:${v.transferEnabled ? "" : "none"}">
+        <div class="form-group" id="v-transfer-number-wrap" style="max-width:320px;display:${v.transfer_enabled ? "" : "none"}">
           <label>Transfer To</label>
-          <input type="tel" id="v-transfer-number" value="${escHtml(v.transferNumber)}" placeholder="+1 (555) 123-4567" />
+          <input type="tel" id="v-transfer-number" value="${escAttr(v.transfer_number || "")}" placeholder="+1 (555) 123-4567" />
         </div>
 
         <div class="form-group" style="margin-top:18px">
           <label>When voice is off, credits run out, or it's after hours</label>
           <div class="flex-row" style="gap:8px;flex-wrap:wrap">
-            <button class="btn ${v.fallbackMode === "voicemail" ? "btn-primary" : "btn-secondary"} btn-sm" id="v-fb-voicemail" onclick="voiceMockField('fallbackMode','voicemail')">Take Voicemail</button>
-            <button class="btn ${v.fallbackMode === "forward" ? "btn-primary" : "btn-secondary"} btn-sm" id="v-fb-forward" onclick="voiceMockField('fallbackMode','forward')">Forward Calls</button>
+            <button class="btn ${_voicePills.fallbackMode === "voicemail" ? "btn-primary" : "btn-secondary"} btn-sm" id="v-fb-voicemail" onclick="voiceSetFallback('voicemail')">Take Voicemail</button>
+            <button class="btn ${_voicePills.fallbackMode === "forward" ? "btn-primary" : "btn-secondary"} btn-sm" id="v-fb-forward" onclick="voiceSetFallback('forward')">Forward Calls</button>
           </div>
         </div>
-        <div class="form-group" id="v-fb-voicemail-wrap" style="display:${v.fallbackMode === "voicemail" ? "" : "none"}">
+        <div class="form-group" id="v-fb-voicemail-wrap" style="display:${_voicePills.fallbackMode === "voicemail" ? "" : "none"}">
           <label>Voicemail Greeting <span class="hint">(spoken in the account's voice, then the caller can leave a message)</span></label>
-          <textarea id="v-voicemail-greeting" rows="2" maxlength="300">${escHtml(v.voicemailGreeting)}</textarea>
+          <textarea id="v-voicemail-greeting" rows="2" maxlength="300">${escHtml(v.voicemail_greeting || "")}</textarea>
         </div>
-        <div class="form-group" id="v-fb-forward-wrap" style="max-width:320px;display:${v.fallbackMode === "forward" ? "" : "none"}">
+        <div class="form-group" id="v-fb-forward-wrap" style="max-width:320px;display:${_voicePills.fallbackMode === "forward" ? "" : "none"}">
           <label>Forward To</label>
-          <input type="tel" id="v-fallback-number" value="${escHtml(v.fallbackNumber)}" placeholder="+1 (555) 123-4567" />
+          <input type="tel" id="v-fallback-number" value="${escAttr(v.fallback_number || "")}" placeholder="+1 (555) 123-4567" />
           <div class="form-hint">Calls ring straight through — the AI never picks up.</div>
         </div>
 
         <div class="form-group" style="margin-top:6px">
           <label>After hours <span class="hint">(uses the working hours from KB → Business Details)</span></label>
           <div class="flex-row" style="gap:8px;flex-wrap:wrap">
-            <button class="btn ${v.afterHours === "answer" ? "btn-primary" : "btn-secondary"} btn-sm" id="v-ah-answer" onclick="voiceMockField('afterHours','answer')">Answer Anyway</button>
-            <button class="btn ${v.afterHours === "fallback" ? "btn-primary" : "btn-secondary"} btn-sm" id="v-ah-fallback" onclick="voiceMockField('afterHours','fallback')">Use Fallback</button>
+            <button class="btn ${_voicePills.afterHours === "answer" ? "btn-primary" : "btn-secondary"} btn-sm" id="v-ah-answer" onclick="voiceSetAfterHours('answer')">Answer Anyway</button>
+            <button class="btn ${_voicePills.afterHours === "fallback" ? "btn-primary" : "btn-secondary"} btn-sm" id="v-ah-fallback" onclick="voiceSetAfterHours('fallback')">Use Fallback</button>
           </div>
         </div>
         <button class="btn btn-primary" onclick="voiceSaveEscalation()">Save Escalation &amp; Fallback</button>
@@ -1404,19 +1460,19 @@ function renderVoiceTab(el, org) {
         <div class="stat-grid">
           <div class="stat-card">
             <div class="stat-label">Calls Answered</div>
-            <div class="stat-value">0</div>
+            <div class="stat-value">${usage.callsAnswered}</div>
           </div>
           <div class="stat-card">
             <div class="stat-label">Total Minutes</div>
-            <div class="stat-value">0</div>
+            <div class="stat-value">${usage.totalMinutes}</div>
           </div>
           <div class="stat-card">
             <div class="stat-label">Avg Duration</div>
-            <div class="stat-value">—</div>
+            <div class="stat-value">${usage.avgSeconds != null ? fmtDuration(usage.avgSeconds) : "—"}</div>
           </div>
           <div class="stat-card">
             <div class="stat-label">Credits Burned</div>
-            <div class="stat-value">0</div>
+            <div class="stat-value">${usage.creditsBurned.toLocaleString()}</div>
           </div>
         </div>
         <p class="text-muted" style="font-size:12px;margin-top:12px">
@@ -1426,55 +1482,104 @@ function renderVoiceTab(el, org) {
     </div>`;
 }
 
-function voiceMockField(key, value) {
-  _voiceMock[key] = value;
-  if (key === "enabled" || key === "voice") {
-    renderVoiceTab(document.getElementById("channel-panel"), window._orgData.org);
+function voiceListHtml(selTelnyx) {
+  return VOICE_OPTIONS.map((o, i) => `
+    <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border:1px solid ${selTelnyx === o.telnyx ? "var(--primary)" : "var(--border)"};border-radius:8px;margin-bottom:6px;cursor:pointer;${selTelnyx === o.telnyx ? "background:rgba(59,130,246,0.08)" : ""}"
+         onclick="voiceSelectVoice(${i})">
+      <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();previewVoice('${o.id}')" title="Preview">▶</button>
+      <div style="flex:1">
+        <div style="font-weight:600;font-size:14px">${o.name}</div>
+        <div class="text-muted" style="font-size:12px">${o.desc}</div>
+      </div>
+      ${selTelnyx === o.telnyx ? `<span class="badge badge-blue">Selected</span>` : ""}
+    </div>`).join("");
+}
+
+async function voiceSetEnabled(checked) {
+  if (checked && !_voiceData?.number) {
+    toast("Get a phone number first — the receptionist needs a number to answer", "error");
+    rerenderVoiceTab(); // revert the toggle
     return;
   }
-  if (key === "transferEnabled") {
-    document.getElementById("v-transfer-number-wrap").style.display = value ? "" : "none";
-    return;
-  }
-  if (key === "fallbackMode") {
-    for (const m of ["voicemail", "forward"]) {
-      document.getElementById(`v-fb-${m}`).className = `btn ${m === value ? "btn-primary" : "btn-secondary"} btn-sm`;
-    }
-    document.getElementById("v-fb-voicemail-wrap").style.display = value === "voicemail" ? "" : "none";
-    document.getElementById("v-fb-forward-wrap").style.display = value === "forward" ? "" : "none";
-    return;
-  }
-  if (key === "afterHours") {
-    for (const m of ["answer", "fallback"]) {
-      document.getElementById(`v-ah-${m}`).className = `btn ${m === value ? "btn-primary" : "btn-secondary"} btn-sm`;
-    }
+  const okSave = await voiceSaveConfig({ enabled: checked }, checked ? "Receptionist enabled" : "Receptionist disabled");
+  if (!okSave) rerenderVoiceTab(); // revert the toggle
+}
+
+async function voiceSelectVoice(idx) {
+  const o = VOICE_OPTIONS[idx];
+  if (!o || voiceCfg().tts_voice === o.telnyx) return;
+  // Re-render just the picker so greeting edits aren't lost.
+  const list = document.getElementById("v-voice-list");
+  if (await voiceSaveConfig({ tts_voice: o.telnyx }, `Voice set to ${o.name}`) && list) {
+    list.innerHTML = voiceListHtml(o.telnyx);
   }
 }
 
-function voiceSaveReceptionist() {
-  _voiceMock.greeting = document.getElementById("v-greeting").value.trim();
-  voicePreviewToast();
+// Escalation-card pills are local UI state until "Save Escalation & Fallback".
+function voiceSetFallback(mode) {
+  _voicePills.fallbackMode = mode;
+  for (const m of ["voicemail", "forward"]) {
+    document.getElementById(`v-fb-${m}`).className = `btn ${m === mode ? "btn-primary" : "btn-secondary"} btn-sm`;
+  }
+  document.getElementById("v-fb-voicemail-wrap").style.display = mode === "voicemail" ? "" : "none";
+  document.getElementById("v-fb-forward-wrap").style.display = mode === "forward" ? "" : "none";
 }
 
-function voiceSaveEscalation() {
-  _voiceMock.transferNumber = document.getElementById("v-transfer-number").value.trim();
-  _voiceMock.fallbackNumber = document.getElementById("v-fallback-number").value.trim();
-  _voiceMock.voicemailGreeting = document.getElementById("v-voicemail-greeting").value.trim();
-  voicePreviewToast();
+function voiceSetAfterHours(mode) {
+  _voicePills.afterHours = mode;
+  for (const m of ["answer", "fallback"]) {
+    document.getElementById(`v-ah-${m}`).className = `btn ${m === mode ? "btn-primary" : "btn-secondary"} btn-sm`;
+  }
 }
 
-function voiceReleaseNumber() {
-  if (!confirm(`Release ${_voiceMock.number}?\n\nThis gives the number back and it may not be recoverable.`)) return;
-  const typed = prompt(`To confirm, type the number exactly:\n\n${_voiceMock.number}`);
+async function voiceSaveReceptionist() {
+  const greeting = document.getElementById("v-greeting").value.trim();
+  if (!greeting) { toast("Greeting cannot be empty", "error"); return; }
+  await voiceSaveConfig({ greeting_text: greeting }, "Receptionist settings saved");
+}
+
+async function voiceSaveEscalation() {
+  const updates = {
+    transfer_enabled: document.getElementById("v-transfer-enabled").checked,
+    transfer_number: document.getElementById("v-transfer-number").value.trim(),
+    fallback_mode: _voicePills.fallbackMode,
+    fallback_number: document.getElementById("v-fallback-number").value.trim(),
+    voicemail_greeting: document.getElementById("v-voicemail-greeting").value.trim(),
+    after_hours_mode: _voicePills.afterHours,
+  };
+  if (updates.transfer_enabled && !updates.transfer_number) {
+    toast("Warm transfer needs a number to transfer to", "error");
+    return;
+  }
+  if (updates.fallback_mode === "forward" && !updates.fallback_number) {
+    toast("Forward fallback needs a number to forward to", "error");
+    return;
+  }
+  if (!updates.voicemail_greeting) {
+    toast("Voicemail greeting cannot be empty", "error");
+    return;
+  }
+  await voiceSaveConfig(updates, "Escalation & fallback saved");
+}
+
+async function voiceReleaseNumber() {
+  const num = _voiceData?.number;
+  if (!num) return;
+  const display = fmtUsNumber(num.phone_number);
+  if (!confirm(`Release ${display}?\n\nThis gives the number back and it may not be recoverable. The receptionist will be disabled.`)) return;
+  const typed = prompt(`To confirm, type the number exactly:\n\n${display}`);
   if (typed === null) return;
-  if (typed.replace(/\D/g, "") !== _voiceMock.number.replace(/\D/g, "")) {
+  if (typed.replace(/\D/g, "") !== String(num.phone_number).replace(/\D/g, "")) {
     toast("Number didn't match — release cancelled", "error");
     return;
   }
-  _voiceMock.number = null;
-  _voiceMock.enabled = false;
-  renderVoiceTab(document.getElementById("channel-panel"), window._orgData.org);
-  voicePreviewToast();
+  try {
+    await api("release_phone_number", { org_id: currentOrgId });
+    toast("Number released — receptionist disabled", "success");
+    loadVoiceData(currentOrgId); // config.enabled was force-disabled server-side
+  } catch (e) {
+    toast(e.message, "error");
+  }
 }
 
 // Plays the pre-generated Telnyx TTS sample clip (public/voice-previews/) so
@@ -1492,12 +1597,12 @@ function previewVoice(voiceId) {
   audio.play().catch(() => toast("Couldn't play the voice preview", "error"));
 }
 
-// ── Number provisioning modal (Softphone-style, mock search) ─────────────────
+// ── Number provisioning modal (search_available_numbers → order_phone_number) ──
 
-let _vnumSearch = { areaCode: "", results: [], selected: null, timer: null };
+let _vnumSearch = { areaCode: "", results: [], selected: null, timer: null, seq: 0 };
 
 function showVoiceNumberModal() {
-  _vnumSearch = { areaCode: "", results: [], selected: null, timer: null };
+  _vnumSearch = { areaCode: "", results: [], selected: null, timer: null, seq: 0 };
   const modal = document.createElement("div");
   modal.className = "modal-backdrop";
   modal.id = "voice-number-modal";
@@ -1540,8 +1645,8 @@ function voiceNumberSearchInput(input) {
   _vnumSearch.timer = setTimeout(() => voiceNumberSearch(), 400);
 }
 
-// Mock availability search — replaced by dashboard-api → Telnyx at wiring time.
-function voiceNumberSearch() {
+// Real availability search via dashboard-api → Telnyx (debounced from the input).
+async function voiceNumberSearch() {
   const resultsEl = document.getElementById("vnum-results");
   if (!resultsEl) return;
   const area = _vnumSearch.areaCode;
@@ -1549,17 +1654,24 @@ function voiceNumberSearch() {
     resultsEl.innerHTML = `<p class="text-muted" style="font-size:13px">Enter an area code to see available numbers.</p>`;
     return;
   }
-  _vnumSearch.results = Array.from({ length: 6 }, (_, i) => {
-    const suffix = String(100 + Math.floor(Math.random() * 899));
-    return {
-      e164: `+1${area}555${String(i + 1).padStart(2, "0")}${suffix.slice(0, 2)}`,
-      display: `+1 (${area}) 555-01${i}${suffix[0]}`,
-      city: ["Springfield", "Riverton", "Lakeside", "Fairview", "Georgetown", "Madison"][i],
-      region: "US",
-      capabilities: i % 3 === 2 ? ["Voice"] : ["Voice", "SMS"],
-    };
-  });
-  voiceNumberRenderResults();
+  const seq = ++_vnumSearch.seq; // race guard for rapid typing
+  resultsEl.innerHTML = `<p class="text-muted" style="font-size:13px">Searching…</p>`;
+  try {
+    const d = await api("search_available_numbers", { org_id: currentOrgId, area_code: area });
+    if (seq !== _vnumSearch.seq || !document.getElementById("vnum-results")) return;
+    _vnumSearch.results = (d.results || []).map(r => ({
+      e164: r.phone_number,
+      display: fmtUsNumber(r.phone_number),
+      city: r.city || "—",
+      region: r.region || "US",
+      capabilities: r.capabilities?.length ? r.capabilities : ["Voice"],
+    }));
+    voiceNumberRenderResults();
+  } catch (e) {
+    if (seq === _vnumSearch.seq && document.getElementById("vnum-results")) {
+      resultsEl.innerHTML = `<p class="text-muted" style="font-size:13px">${escHtml(e.message)}</p>`;
+    }
+  }
 }
 
 function voiceNumberRenderResults() {
@@ -1629,12 +1741,23 @@ function voiceNumberConfirm() {
     </div>`;
 }
 
-function voiceNumberPurchase() {
+async function voiceNumberPurchase() {
   const n = _vnumSearch.results.find(x => x.e164 === _vnumSearch.selected);
-  document.getElementById("voice-number-modal")?.remove();
-  _voiceMock.number = n.display;
-  renderVoiceTab(document.getElementById("channel-panel"), window._orgData.org);
-  toast(`Number ${n.display} assigned (preview — provisioning not wired yet)`, "success");
+  if (!n) return;
+  const body = document.getElementById("vnum-body");
+  body.innerHTML = `<p class="text-muted" style="text-align:center;padding:24px 0">Ordering ${escHtml(n.display)}…</p>`;
+  try {
+    await api("order_phone_number", { org_id: currentOrgId, phone_number: n.e164, capabilities: n.capabilities });
+    document.getElementById("voice-number-modal")?.remove();
+    toast(`Number ${n.display} is live on this account`, "success");
+    // Voice burn rate may have changed (10↔12 cr/min) — refresh org data too.
+    const data = await api("get_org", { org_id: currentOrgId });
+    window._orgData = { ...window._orgData, ...data };
+    loadVoiceData(currentOrgId);
+  } catch (e) {
+    toast(e.message, "error");
+    voiceNumberShowSearch(); // back to search so they can pick another number
+  }
 }
 
 // ── Widget Tab ────────────────────────────────────────────────────────────────

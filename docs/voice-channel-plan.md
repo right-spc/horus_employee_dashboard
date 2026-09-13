@@ -6,7 +6,7 @@
 > **2026-09-11 revision** (supersedes older sections where they conflict):
 > - **KB architecture**: `kb.kb_chunks` was DROPPED. The KB is now `kb.kb_versions` (sections JSONB) with whole-KB injection. "Same KB, zero duplication" now means: voice instructions = the same `buildSystemPrompt` output (version-based) + voice wrapper. `loadAllKbChunks` → version loader.
 > - **Dashboard layout**: no "Phone" org tab. Voice lives in the **Channels tab as a third pill** (`Website Chat · Email · Voice`; SMS later). **Demo orgs get NO voice** — website chat only.
-> - **Privacy model (hard rule)**: employees see **aggregate usage only** — calls answered, total minutes, average duration, credits burned. NO caller numbers, NO per-call rows, NO recordings, NO transcripts anywhere in the employee dashboard. Conversations land in the CUSTOMER's inbox (channel `voice`). Employee APIs must not expose `comms.calls` rows.
+> - **Privacy model (hard rule)**: employees see **aggregate usage only** — calls answered, total minutes, average duration, credits burned. NO caller numbers, NO per-call rows, NO recordings, NO transcripts anywhere in the employee dashboard. Conversations land in the CUSTOMER's inbox (channel `voice`). Employee APIs must not expose `voice.calls` rows.
 > - **Recording cut from v1** — employees can't access recordings anyway; no reason to generate/store them.
 > - **Fallback routing (new)**: when voice is disabled, the credit pool is exhausted, or after-hours says so → per-org fallback: `forward` (ring straight through to a forwarding number, no AI) or `voicemail` (caller hears a spoken greeting + leaves a message). Voicemail greeting = **typed text spoken via TTS** in the account's chosen voice (no audio upload in v1).
 > - **Bundled pricing**: clients are NOT charged per number ($1/mo) or per-minute line items — everything is inside the voice package. The provisioning UI shows NO prices.
@@ -53,11 +53,11 @@ Fixed cost per idle org: **$1/mo**. A 200-call/mo client (~13 talk-hours) ≈ **
 ## 4. End-to-end call flow
 
 ```
-1. Customer dials org's number (comms.phone_numbers)
+1. Customer dials org's number (voice.phone_numbers)
 2. Telnyx Call Control → handle-inbound-call edge function
    - resolve org by destination number
    - checks: voice enabled? monthly minute cap? after-hours mode?
-   - insert comms.calls row → answer → ai_assistant_start(org's assistant_id)
+   - insert voice.calls row → answer → ai_assistant_start(org's assistant_id)
 3. Telnyx engine runs the call: Deepgram STT → Kimi K2.6 (thinking off) → TTS
    - barge-in, turn-taking, filler words handled by the engine
 4. Mid-call tools → voice-tools edge function (sync webhooks + Telnyx filler messages
@@ -68,7 +68,7 @@ Fixed cost per idle org: **$1/mo**. A 200-call/mo client (~13 talk-hours) ≈ **
      voicemail detection on transfer)
 5. Call ends → handle-call-events receives call.conversation.ended
    - full transcript → messaging.conversations (channel 'voice') + messages rows
-   - recording URL, duration, outcome, cost → comms.calls
+   - recording URL, duration, outcome, cost → voice.calls
    - call.conversation_insights.generated → structured analysis for dashboard
 6. Call appears in dashboard inbox with transcript + recording player
 ```
@@ -91,15 +91,15 @@ Prove quality before building product surface:
 
 ### Phase 1 — Core plumbing (multi-tenant inbound, ~2–4 days)
 
-**1a. DB migration** (`supabase/migrations/`):
-- `comms.phone_numbers` — id, organization_id, telnyx_number_id, phone_number (E.164), capabilities (sms/voice), status, monthly_cost_cents
-- `comms.calls` — id, organization_id, conversation_id (nullable), telnyx_call_control_id (unique), direction, from/to, assistant_id, timestamps, duration_seconds, recording_url, engine_minutes, llm token counts, cost_usd, outcome (completed/transferred/message_taken/abandoned), hangup_reason
-- `comms.voice_configs` — organization_id PK, enabled, telnyx_assistant_id, tts_voice, greeting_text, after_hours_mode ('answer'/'fallback'), transfer_enabled, transfer_number, **fallback_mode ('forward'/'voicemail'), fallback_number, voicemail_greeting**, max_monthly_minutes (legacy — superseded by the credit pool), instructions_version, synced_at. NO recording_enabled (recording cut from v1 — privacy rule)
-- **`messaging.conversations.channel` CHECK: ALTER to add 'voice'** (currently missing — verified 2026-09-11)
-- `core.org_services` row for voice per org (usage_pool 'credits', credit_cost 10/min placeholder) — the credit-pool migration (20260915000000) already built this machinery
-- Verify `messaging.conversations.channel` has no CHECK constraint blocking 'voice' (alter if needed)
+**1a. DB migration** ✅ APPLIED (`supabase/migrations/20260917000000_voice_schema.sql`) — landed in a NEW `voice` schema (one-domain-per-schema house pattern) instead of `comms`:
+- `voice.phone_numbers` — id, organization_id (UNIQUE — 1/org v1), telnyx_number_id, phone_number (E.164, UNIQUE), capabilities, status (pending/active/released/failed), monthly_cost_cents (internal only — bundled pricing)
+- `voice.calls` — id, organization_id, conversation_id (nullable), telnyx_call_control_id (unique), direction, from/to_number, assistant_id, answered/ended_at, duration_seconds, engine_minutes, llm token counts, cost_usd, outcome (+voicemail/forwarded), hangup_reason, credits_charged. **NO recording_url** (recordings cut from v1 — privacy rule). **NO core bridge view** — PostgREST has no path to raw call rows; aggregates via server-side RPC (later phase)
+- `voice.configs` — organization_id PK, enabled, telnyx_assistant_id, tts_voice (default = Cindy Ultra), greeting_text, after_hours_mode, transfer_enabled/number, fallback_mode/number, voicemail_greeting, instructions_version, synced_at. Server CHECKs: transfer needs a number; forward fallback needs a number. (max_monthly_minutes dropped — superseded by credit pool)
+- ✅ `messaging.conversations.channel` CHECK altered — now includes 'voice'
+- ✅ `core.phone_numbers` + `core.voice_configs` security-invoker bridge views (PostgREST path); RLS org-isolation policies on all 3 tables (same `auth_org_id()` pattern)
+- TODO `core.org_services` row for voice per org (usage_pool 'credits', credit_cost 10/min placeholder) — the credit-pool migration (20260915000000) already built this machinery
 - Verify `crm.contact_aliases` accepts phone aliases (callers merge with email/chat contacts)
-- Grants per schema-reorg pattern; `comms` already in PostgREST schema list ✓
+- Grants per schema-reorg pattern; PostgREST reaches voice tables via the `core` bridge views ✓ (verified live: `core.phone_numbers` + `core.voice_configs` return 200; no view exists for calls — privacy rule structural)
 
 **1b. Shared prompt extraction:**
 - Extract `buildSystemPrompt` + the KB-version loader from widget-chat into `supabase/functions/_shared/horus-prompt.ts`; widget-chat + handle-inbound-email import it (pure refactor, redeploy both)
@@ -108,7 +108,7 @@ Prove quality before building product surface:
 **1c. Edge functions** (all `verify_jwt=false`, deploy `--no-verify-jwt`, Ed25519 webhook signature verification):
 - `handle-inbound-call` — Call Control state machine (initiated → checks → answer → start assistant; hangup → finalize cost)
 - `voice-tools` — assistant webhook tools: check_availability, book_appointment, send_text, escalate. Auth via per-org integration-secret header. <2s response target
-- `handle-call-events` — conversation.ended / insights → transcript into conversations/messages (channel 'voice'), recording+cost into comms.calls, analytics events
+- `handle-call-events` — conversation.ended / insights → transcript into conversations/messages (channel 'voice'), recording+cost into voice.calls, analytics events
 
 **1d. Assistant sync:** `_shared/voice-assistant-sync.ts` — `syncOrgAssistant(orgId)` creates assistant or POSTs new version; triggered from dashboard-api on KB/persona/profile/hours/services/voice-config saves; retry w/ backoff; stale `synced_at` badge on persistent failure (voice keeps answering with last-good instructions)
 
@@ -122,12 +122,12 @@ Per owner 2026-09-11: the UI is built BEFORE the Phase 0 spike, as a working she
 
 1. **Status strip** — voice enabled state · assistant sync status (`Synced ✓ / Syncing… / Stale`) · minutes this cycle (from the shared credit pool, link to Billing tab)
 2. **Phone Number card**
-   - No number: explainer + "Get a Phone Number" → provisioning modal (Softphone-style): area-code input → debounced live search (`dashboard-api search_available_numbers`, Telnyx `available_phone_numbers` filtered US local) → results with capability badges → select ONE → confirm step (NO prices — "included in the voice package") → `order_phone_number` → number row in `comms.phone_numbers`
+   - No number: explainer + "Get a Phone Number" → provisioning modal (Softphone-style): area-code input → debounced live search (`dashboard-api search_available_numbers`, Telnyx `available_phone_numbers` filtered US local) → results with capability badges → select ONE → confirm step (NO prices — "included in the voice package") → `order_phone_number` → number row in `voice.phone_numbers`
    - Has number: formatted number + copy button, capability badges (Voice / SMS), "Release number" behind typed-confirm guard (`release_phone_number` → Telnyx `DELETE /phone_numbers/{id}`)
 3. **AI Receptionist card**
    - Enabled toggle (master switch)
-   - Voice picker: 4–6 curated TTS voices as selectable rows w/ ▶ preview clip, saved per org (`voice_configs.tts_voice`)
-   - Greeting text textarea w/ live counter (`voice_configs.greeting_text`)
+   - Voice picker: 4–6 curated TTS voices as selectable rows w/ ▶ preview clip, saved per org (`voice.configs.tts_voice`)
+   - Greeting text textarea w/ live counter (`voice.configs.greeting_text`)
 4. **Escalation & Fallback card**
    - Warm transfer: toggle + transfer-to number (`transfer_enabled`, `transfer_number`; no-answer → AI takes call back, message-taking)
    - Fallback when disabled / pool exhausted / after-hours: pill `Forward calls` (fallback_number input) vs `Voicemail` (voicemail_greeting textarea, spoken via TTS in the org's voice)

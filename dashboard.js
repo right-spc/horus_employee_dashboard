@@ -3731,9 +3731,14 @@ function billingMockState(orgId) {
     freeMonths: 0,         // extra months granted on yearly renewal (RBAC-capped later)
     rolloverEnabled: true, // monthly credits carry exactly 1 cycle when on
     rolloverCredits: 0,    // bucket balance — real column lands with the migration
+    voiceEnabled: false,   // mock until the voice org_services row is seeded
   };
   return _billingMock;
 }
+
+// MOCK per-service minimum monthly prices — real values will live in the DB
+// (system settings), and the enforced floor = Σ minimums of ACTIVE services.
+const SERVICE_MIN_MOCK = { webchat: 100, email: 50, voice: 200 };
 
 function billingPreviewToast() {
   toast("UI preview — dynamic pricing isn't wired yet, nothing was saved.", "default");
@@ -3751,6 +3756,11 @@ function billingSavePlan() {
   _billingMock.price = price;
   if (_billingMock.term === "yearly") {
     _billingMock.freeMonths = parseInt(document.getElementById("bill-free-months")?.value || "0", 10) || 0;
+  }
+  const floor = _billingMock.activeFloor || 0;
+  if (price < floor) {
+    toast(`Below the $${floor.toLocaleString()}/mo floor for the active services — this save would need an authorized override.`, "error");
+    return;
   }
   billingPreviewToast();
 }
@@ -3788,17 +3798,24 @@ function renderPaymentsTab(el, org) {
   const resetStr = creditCycleResetDate(org).toLocaleDateString("en-US", { month: "long", day: "numeric" });
   const suspended = !!pool?.limit_exceeded_at;
 
-  // Services — the 3 channels; seeded rows get real toggles, unseeded (voice) get a preview row
+  // Services — the 3 channels; seeded rows get real toggles, voice gets a mock
+  // toggle until its org_services row is seeded by the migration
+  const activeChannels = [];
   const serviceRows = CHANNEL_ORDER.map(ch => {
     const s = services.find(x => x.service === ch);
     if (!s) {
+      if (m.voiceEnabled) activeChannels.push(ch);
       return `<tr>
-        <td class="font-semibold">${SERVICE_LABELS[ch]}</td>
+        <td class="font-semibold">${SERVICE_LABELS[ch]} <span class="badge badge-blue" style="margin-left:6px">preview</span></td>
         <td class="text-sm">${ch === "voice" ? "10 credits / minute" : "—"}</td>
-        <td><span class="badge badge-blue">seeds with migration</span></td>
+        <td>
+          <label class="toggle"><input type="checkbox" ${m.voiceEnabled ? "checked" : ""}
+            onchange="billingMockField('voiceEnabled', this.checked)"><span class="toggle-slider"></span></label>
+        </td>
         <td></td>
       </tr>`;
     }
+    if (s.enabled) activeChannels.push(ch);
     return `<tr>
       <td class="font-semibold">${SERVICE_LABELS[ch]}</td>
       <td class="text-sm">${s.credit_cost} credit${s.credit_cost === 1 ? "" : "s"} / ${ch === "voice" ? "minute" : "message"}</td>
@@ -3809,6 +3826,12 @@ function renderPaymentsTab(el, org) {
       ${isOwner ? `<td class="table-actions"><button class="btn btn-ghost btn-sm" onclick="editService('${s.id}', '${ch}', ${s.credit_cost})">Rate</button></td>` : "<td></td>"}
     </tr>`;
   }).join("");
+
+  // Dynamic floor: Σ per-service minimums over ACTIVE services (mock values
+  // until the DB settings land) — shown as small text under the price input
+  const activeFloor = activeChannels.reduce((sum, ch) => sum + (SERVICE_MIN_MOCK[ch] || 0), 0);
+  m.activeFloor = activeFloor;
+  const floorBreakdown = activeChannels.map(ch => `${SERVICE_LABELS[ch]} $${SERVICE_MIN_MOCK[ch]}`).join(" + ");
 
   el.innerHTML = `
     <div class="card mb-4">
@@ -3829,7 +3852,9 @@ function renderPaymentsTab(el, org) {
             <label>Monthly price (USD)</label>
             <input type="number" id="bill-price" min="0" step="1" value="${m.price}" />
             <div class="text-muted" style="font-size:12px;margin-top:4px">
-              One price for whatever services are active. A minimum floor lives in the database — below-floor saves will need an authorized override.
+              ${activeChannels.length === 0
+                ? "No services active — no minimum applies."
+                : `Minimum for the active services: <strong>$${activeFloor.toLocaleString()}/mo</strong> <span style="opacity:.75">(${floorBreakdown} — mock values, will live in the database)</span>. Below-floor saves need an authorized override.`}
             </div>
           </div>
           <div class="form-group">

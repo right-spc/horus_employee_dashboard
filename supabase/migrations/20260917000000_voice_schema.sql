@@ -2,7 +2,8 @@
 -- Creates the `voice` domain schema (one-domain-per-schema house pattern):
 --   voice.phone_numbers  — provisioned Telnyx numbers (1 per org in v1)
 --   voice.configs        — per-org AI receptionist configuration
---   voice.calls          — per-call records (billing/cost reconciliation + aggregate stats)
+--   voice.calls          — per-call records (billing/cost reconciliation + aggregate stats,
+--                          recording_url for internal storage — see 20260917010000)
 -- Privacy rule: employees NEVER see caller numbers/recordings/transcripts — only
 -- aggregates. That's enforced structurally: voice.calls gets NO core bridge view,
 -- so PostgREST (core-only) has no path to raw call rows. Aggregates come from a
@@ -58,7 +59,8 @@ CREATE TABLE voice.configs (
 );
 
 -- ── voice.calls ───────────────────────────────────────────────────────────────
--- NO recording_url — recordings cut from v1 (privacy rule).
+-- recording_url added in 20260917010000 (calls ARE recorded/transcribed —
+-- employees just can't reach them: no core bridge view, aggregates-only RPC).
 CREATE TABLE voice.calls (
   id                     uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   organization_id        uuid NOT NULL REFERENCES core.organizations(id) ON DELETE CASCADE,

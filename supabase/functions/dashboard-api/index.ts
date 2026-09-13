@@ -562,9 +562,11 @@
               usage_pool: "credits",
               credit_cost: 1,
             })),
-            // Every real org gets a voice row (off, 10 credits/min) so the
-            // billing/channel toggles can activate it without extra setup.
+            // Every real org gets voice (off, 10 credits/min) and sms (off,
+            // 3 credits/reply) rows so the billing/channel toggles can activate
+            // them without extra setup.
             { organization_id: org.id, service: "voice", enabled: false, usage_pool: "credits", credit_cost: 10 },
+            { organization_id: org.id, service: "sms", enabled: false, usage_pool: "credits", credit_cost: 3 },
           ]);
           await adminClient.schema("voice").from("configs").insert({ organization_id: org.id });
 
@@ -1115,16 +1117,86 @@
             if (!Number.isInteger(v) || v < 0 || v > 24) return err("free_months must be an integer 0–24", 400);
             row.free_months = v;
           }
+          // Intro pricing schedule: time-boxed (<=12 cycles) and at-or-below the
+          // standard price — it's a discount window, not a floor bypass.
+          if (typeof updates.intro_price !== "undefined") {
+            if (updates.intro_price === null) {
+              row.intro_price_cents = null;
+            } else {
+              const dollars = Number(updates.intro_price);
+              if (!Number.isFinite(dollars) || dollars < 0) return err("intro_price must be a non-negative number", 400);
+              row.intro_price_cents = Math.round(dollars * 100);
+            }
+          }
+          if (typeof updates.intro_cycles_remaining !== "undefined") {
+            const v = Math.floor(Number(updates.intro_cycles_remaining));
+            if (!Number.isInteger(v) || v < 0 || v > 12) return err("intro_cycles_remaining must be an integer 0–12", 400);
+            row.intro_cycles_remaining = v;
+          }
+          if (typeof row.intro_price_cents !== "undefined" || typeof row.intro_cycles_remaining !== "undefined") {
+            const { data: cur } = await adminClient
+              .schema("core").from("organizations")
+              .select("monthly_price_cents, intro_price_cents, intro_cycles_remaining")
+              .eq("id", org_id).single();
+            const introC = (row.intro_price_cents !== undefined ? row.intro_price_cents : cur?.intro_price_cents) as number | null;
+            const cycles = (row.intro_cycles_remaining !== undefined ? row.intro_cycles_remaining : cur?.intro_cycles_remaining) as number;
+            const stdC = (row.monthly_price_cents !== undefined ? row.monthly_price_cents : cur?.monthly_price_cents) as number | null;
+            if (cycles > 0 && introC == null) return err("Intro cycles set but no intro price — set intro_price too", 400);
+            if (cycles > 0 && stdC != null && introC != null && introC > stdC) {
+              return err("Intro price must be at or below the standard price", 400);
+            }
+          }
           if (Object.keys(row).length === 0) return err("Nothing to update", 400);
 
           const { data: saved, error } = await adminClient
             .schema("core").from("organizations")
             .update(row)
             .eq("id", org_id)
-            .select("monthly_price_cents, subscription_plan, free_months")
+            .select("monthly_price_cents, subscription_plan, free_months, intro_price_cents, intro_cycles_remaining")
             .single();
           if (error) throw error;
           return ok({ success: true, billing: saved });
+        }
+
+        case "apply_plan_template": {
+          // One-click plan: fills price + intro schedule + allowance + service
+          // activation from the template DATA in system.settings. Fields stay
+          // editable afterwards — templates are fast data entry, not cages.
+          const { org_id, template_key } = body as { org_id: string; template_key: string };
+          if (!org_id || !template_key) return err("Missing org_id or template_key", 400);
+          await assertOrgAccess(adminClient, dashUser, org_id);
+          await assertNotDemoForStaff(adminClient, dashUser, org_id);
+
+          const { planTemplates } = await getBillingSettings(adminClient);
+          const t = planTemplates.find((x) => x.key === template_key);
+          if (!t) return err("Unknown plan template", 400);
+
+          const nowIso = new Date().toISOString();
+          const { error: orgErr } = await adminClient
+            .schema("core").from("organizations")
+            .update({
+              monthly_price_cents: t.monthly_price_cents,
+              intro_price_cents: t.intro_price_cents ?? null,
+              intro_cycles_remaining: t.intro_cycles ?? 0,
+            })
+            .eq("id", org_id);
+          if (orgErr) throw orgErr;
+
+          const { error: poolErr } = await adminClient
+            .schema("core").from("org_usage_pools")
+            .update({ monthly_limit: t.monthly_credits, updated_at: nowIso })
+            .eq("organization_id", org_id).eq("pool", "credits");
+          if (poolErr) throw poolErr;
+
+          const tplServices = new Set(t.services as string[]);
+          for (const ch of ["webchat", "email", "sms", "voice"]) {
+            const { error: svcErr } = await adminClient
+              .schema("core").from("org_services")
+              .update({ enabled: tplServices.has(ch), updated_at: nowIso })
+              .eq("organization_id", org_id).eq("service", ch);
+            if (svcErr) throw svcErr;
+          }
+          return ok({ success: true, applied: t });
         }
 
         case "update_service": {
@@ -2498,7 +2570,16 @@
             .select()
             .single();
           if (error) throw error;
-          return ok({ success: true, number: row });
+
+          // Voice burn rate tracks the number type: local 10 cr/min, toll-free 12
+          const numberType = numberTypeFor(phone_number);
+          await adminClient
+            .schema("core").from("org_services")
+            .update({ credit_cost: numberType === "local" ? 10 : 12, updated_at: new Date().toISOString() })
+            .eq("organization_id", org_id).eq("service", "voice");
+
+          const { numberFees } = await getBillingSettings(adminClient);
+          return ok({ success: true, number: row, numberType, fee: numberFees[numberType] ?? null });
         }
 
         case "release_phone_number": {
@@ -2576,13 +2657,28 @@
   // ── Billing settings (floor values live in the DB, never in code) ──────────
   async function getBillingSettings(
     adminClient: ReturnType<typeof createClient>
-  ): Promise<{ minMonthlyCredits: number; pricePer1000Cents: number }> {
+  ): Promise<{
+    minMonthlyCredits: number;
+    pricePer1000Cents: number;
+    planTemplates: Array<Record<string, unknown>>;
+    numberFees: Record<string, Record<string, unknown>>;
+  }> {
     const { data } = await adminClient.schema("system").from("settings").select("key, value");
-    const map = Object.fromEntries((data || []).map((r) => [r.key as string, Number(r.value)]));
+    const map = Object.fromEntries((data || []).map((r) => [r.key as string, r.value]));
     return {
-      minMonthlyCredits: map.min_monthly_credits ?? 1000,
-      pricePer1000Cents: map.price_per_1000_credits_cents ?? 5900,
+      minMonthlyCredits: Number(map.min_monthly_credits ?? 1000),
+      pricePer1000Cents: Number(map.price_per_1000_credits_cents ?? 4990),
+      planTemplates: Array.isArray(map.plan_templates) ? map.plan_templates as Array<Record<string, unknown>> : [],
+      numberFees: (map.number_fees ?? {}) as Record<string, Record<string, unknown>>,
     };
+  }
+
+  // Toll-free NPAs (800 is the scarce "vanity" class with its own fee tier)
+  const TOLL_FREE_NPAS = new Set(["888", "877", "866", "855", "844", "833"]);
+  function numberTypeFor(e164: string): "local" | "tollfree" | "vanity800" {
+    const npa = e164.replace(/^\+1/, "").slice(0, 3);
+    if (npa === "800") return "vanity800";
+    return TOLL_FREE_NPAS.has(npa) ? "tollfree" : "local";
   }
 
   // Owners pass implicitly; everyone else needs the explicit permission flag.
@@ -2703,7 +2799,7 @@
   ): Promise<{ ok: boolean; newEndDate?: string; error?: string; status?: number }> {
     const { data: currentOrg, error: fetchErr } = await adminClient
       .schema("core").from("organizations")
-      .select("subscription_plan, subscription_end_date, billing_day_of_month, free_months")
+      .select("subscription_plan, subscription_end_date, billing_day_of_month, free_months, intro_cycles_remaining")
       .eq("id", orgId)
       .single();
 
@@ -2725,12 +2821,18 @@
       ? addCalendarMonths(baseDate, 12 + freeMonths)
       : addCalendarMonths(baseDate, 1);
 
+    // A monthly renewal consumes one intro-pricing cycle (if any remain)
+    const introRemaining = renewPlan === "monthly"
+      ? Math.max(0, (Number(currentOrg.intro_cycles_remaining) || 0) - 1)
+      : (Number(currentOrg.intro_cycles_remaining) || 0);
+
     const { error: updateErr } = await adminClient
       .schema("core").from("organizations")
       .update({
         subscription_plan: renewPlan,
         subscription_start_date: now.toISOString(),
         subscription_end_date: newEndDate.toISOString(),
+        intro_cycles_remaining: introRemaining,
         ai_responses_enabled: true,
         grace_period_ends_at: null,
         suspension_warning_sent_at: null,

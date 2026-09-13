@@ -12,9 +12,42 @@ No plan names, no preset prices, no tiers. Everything is per-org and dynamic.
 | key | seeded value | meaning |
 |---|---|---|
 | `min_monthly_credits` | 1000 | allowance can't go below this |
-| `price_per_1000_credits_cents` | 5900 | price floor = allowance × rate ($59/1,000) |
+| `price_per_1000_credits_cents` | 4990 | price floor = allowance × rate. Set to the cheapest plan's effective rate (Texting $499/10k) so plan prices always pass; anything cheaper needs override |
+
+Overage (addon packs) = **$59/1,000** — premium one-off rate, credits never expire.
 
 Below-floor saves (price or allowance) require `core.dashboard_users.can_override_price_floor`; owners pass implicitly. Enforced server-side in `dashboard-api` (`update_org_billing`, `update_pool`); the UI floor text is display-only.
+
+## Plan templates (one-click, data in `system.settings.plan_templates`)
+Templates fill price + intro + allowance + service activation; every field stays editable after (not cages).
+
+| Template | Price | Monthly credits | Services |
+|---|---|---|---|
+| Texting | $299/mo ×3 cycles intro → $499 | 10,000 | webchat, email, sms |
+| Texting + Voice | $999/mo ×3 cycles intro → $1,299 | 25,000 | + voice |
+
+Applied via `apply_plan_template` (staff-allowed, demo-blocked). Templates are DATA — edit the settings row, no deploy.
+
+## Intro pricing schedule
+`intro_price_cents` + `intro_cycles_remaining` (0–12) on the org. Guardrails (server): intro ≤ standard price, cycles required if intro price set. Each **monthly** renewal (`extendSubscription`, incl. PayPal capture path) decrements cycles by 1; when it hits 0 the standard price is what gets charged. Employees charge the intro amount while cycles remain (UI shows the schedule).
+
+## Burn rates (`org_services.credit_cost`)
+| Action | Credits |
+|---|---|
+| Website chat / email response | 1 |
+| SMS reply | 3 |
+| Voice minute (local number) | 10 |
+| Voice minute (toll-free) | 12 — set by `order_phone_number` from the NPA |
+
+## Number fees (`system.settings.number_fees`)
+| Item | One-time | Monthly |
+|---|---|---|
+| Local number | included | included |
+| Toll-free (incl. verification) | $300 | $50 |
+| 1-800 (incl. verification) | $1,000 | $100 |
+| 10DLC registration (local SMS) | $150 | — |
+
+Charged via the normal payment tools; `order_phone_number` returns the applicable fee so the UI can prompt the charge. Recurring number fees are folded into the org's monthly price by the employee (UI suggests it).
 
 ## Credits
 Three buckets on `core.org_usage_pools`, burned by `increment_pool_usage` in strict order:

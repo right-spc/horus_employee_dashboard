@@ -2275,6 +2275,196 @@
           return ok({ success: true });
         }
 
+        // ── Voice channel (Phase 1) — demos never get voice (website chat only) ──
+
+        case "get_voice": {
+          const { org_id } = body;
+          if (!org_id) return err("Missing org_id", 400);
+          await assertOrgAccess(adminClient, dashUser, org_id as string);
+          await assertVoiceAllowed(adminClient, org_id as string);
+
+          const [
+            { data: config },
+            { data: number },
+            { data: org },
+          ] = await Promise.all([
+            adminClient.schema("core").from("voice_configs").select("*").eq("organization_id", org_id).maybeSingle(),
+            adminClient.schema("core").from("phone_numbers").select("*").eq("organization_id", org_id).neq("status", "released").maybeSingle(),
+            adminClient.schema("core").from("organizations").select("subscription_end_date").eq("id", org_id).single(),
+          ]);
+
+          // Aggregate usage for the current credit cycle (anchor = subscription_end_date
+          // day-of-month, same as the pool reset RPC). Privacy rule: aggregates ONLY —
+          // no caller numbers, no rows, no recordings, no transcripts leave this action.
+          const anchorDay = org?.subscription_end_date ? new Date(org.subscription_end_date as string).getUTCDate() : 1;
+          const now = new Date();
+          let cycleStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), anchorDay));
+          if (cycleStart > now) cycleStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, anchorDay));
+
+          const { data: calls, error: callsErr } = await adminClient
+            .schema("voice").from("calls")
+            .select("answered_at, duration_seconds, credits_charged")
+            .eq("organization_id", org_id)
+            .gte("created_at", cycleStart.toISOString());
+          if (callsErr) throw callsErr;
+
+          const rows = calls || [];
+          const answered = rows.filter((c) => c.answered_at);
+          const totalSeconds = answered.reduce((s, c) => s + (c.duration_seconds as number || 0), 0);
+          return ok({
+            config: config || null,
+            number: number || null,
+            usage: {
+              cycleStart: cycleStart.toISOString(),
+              callsAnswered: answered.length,
+              totalMinutes: Math.round((totalSeconds / 60) * 10) / 10,
+              avgSeconds: answered.length ? Math.round(totalSeconds / answered.length) : null,
+              creditsBurned: rows.reduce((s, c) => s + (c.credits_charged as number || 0), 0),
+            },
+          });
+        }
+
+        case "update_voice_config": {
+          const { org_id, updates } = body as { org_id: string; updates: Record<string, unknown> };
+          if (!org_id || !updates) return err("Missing org_id or updates", 400);
+          await assertOrgAccess(adminClient, dashUser, org_id);
+          await assertVoiceAllowed(adminClient, org_id);
+
+          const row: Record<string, unknown> = { organization_id: org_id, updated_at: new Date().toISOString() };
+          if (typeof updates.enabled !== "undefined") row.enabled = !!updates.enabled;
+          if (typeof updates.recording_enabled !== "undefined") row.recording_enabled = !!updates.recording_enabled;
+          if (typeof updates.tts_voice !== "undefined") {
+            if (!VOICE_IDS.has(updates.tts_voice as string)) return err("Unknown voice", 400);
+            row.tts_voice = updates.tts_voice;
+          }
+          if (typeof updates.greeting_text !== "undefined") {
+            const g = String(updates.greeting_text || "").trim();
+            if (!g) return err("Greeting cannot be empty", 400);
+            if (g.length > 300) return err("Greeting must be 300 characters or fewer", 400);
+            row.greeting_text = g;
+          }
+          if (typeof updates.transfer_enabled !== "undefined") row.transfer_enabled = !!updates.transfer_enabled;
+          if (typeof updates.transfer_number !== "undefined") row.transfer_number = String(updates.transfer_number || "").trim() || null;
+          if (typeof updates.fallback_mode !== "undefined") {
+            if (!["voicemail", "forward"].includes(updates.fallback_mode as string)) return err("fallback_mode must be voicemail or forward", 400);
+            row.fallback_mode = updates.fallback_mode;
+          }
+          if (typeof updates.fallback_number !== "undefined") row.fallback_number = String(updates.fallback_number || "").trim() || null;
+          if (typeof updates.voicemail_greeting !== "undefined") {
+            const v = String(updates.voicemail_greeting || "").trim();
+            if (!v) return err("Voicemail greeting cannot be empty", 400);
+            if (v.length > 300) return err("Voicemail greeting must be 300 characters or fewer", 400);
+            row.voicemail_greeting = v;
+          }
+          if (typeof updates.after_hours_mode !== "undefined") {
+            if (!["answer", "fallback"].includes(updates.after_hours_mode as string)) return err("after_hours_mode must be answer or fallback", 400);
+            row.after_hours_mode = updates.after_hours_mode;
+          }
+
+          // Server-side consistency (mirrors the table CHECKs)
+          const merged = row as { transfer_enabled?: boolean; transfer_number?: string | null; fallback_mode?: string; fallback_number?: string | null };
+          const { data: existing } = await adminClient.schema("core").from("voice_configs").select("transfer_enabled, transfer_number, fallback_mode, fallback_number").eq("organization_id", org_id).maybeSingle();
+          const te = merged.transfer_enabled ?? existing?.transfer_enabled ?? false;
+          const tn = merged.transfer_number !== undefined ? merged.transfer_number : existing?.transfer_number;
+          const fm = merged.fallback_mode ?? existing?.fallback_mode ?? "voicemail";
+          const fn = merged.fallback_number !== undefined ? merged.fallback_number : existing?.fallback_number;
+          if (te && !tn) return err("Transfer requires a transfer number", 400);
+          if (fm === "forward" && !fn) return err("Forward fallback requires a number to forward to", 400);
+
+          const { data: saved, error } = await adminClient
+            .schema("core").from("voice_configs")
+            .upsert(row, { onConflict: "organization_id" })
+            .select()
+            .single();
+          if (error) throw error;
+          return ok({ success: true, config: saved });
+        }
+
+        case "search_available_numbers": {
+          const { org_id, area_code } = body as { org_id: string; area_code: string };
+          if (!org_id || !area_code) return err("Missing org_id or area_code", 400);
+          await assertOrgAccess(adminClient, dashUser, org_id);
+          await assertVoiceAllowed(adminClient, org_id);
+          if (!/^\d{3}$/.test(area_code)) return err("area_code must be exactly 3 digits", 400);
+
+          const res = await telnyx(
+            `/available_phone_numbers?filter[country_code]=US&filter[national_destination_code]=${area_code}` +
+            `&filter[features][]=voice&filter[limit]=8&filter[quickship]=true`
+          );
+          const results = (res?.data || []).map((n: Record<string, unknown>) => ({
+            phone_number: n.phone_number,
+            city: n.locality || null,
+            region: n.region || "US",
+            capabilities: Array.isArray(n.features)
+              ? [...new Set((n.features as Array<Record<string, unknown>>)
+                  .map((f) => String(f.name || f).toLowerCase())
+                  .filter((s) => s === "voice" || s === "sms")
+                  .map((s) => s === "voice" ? "Voice" : "SMS"))]
+              : ["Voice"],
+          }));
+          return ok({ results });
+        }
+
+        case "order_phone_number": {
+          const { org_id, phone_number, capabilities } = body as { org_id: string; phone_number: string; capabilities?: string[] };
+          if (!org_id || !phone_number) return err("Missing org_id or phone_number", 400);
+          await assertOrgAccess(adminClient, dashUser, org_id);
+          await assertVoiceAllowed(adminClient, org_id);
+          if (!/^\+1\d{10}$/.test(phone_number)) return err("phone_number must be E.164 US (+1XXXXXXXXXX)", 400);
+
+          // v1: one active number per org
+          const { data: existing } = await adminClient
+            .schema("core").from("phone_numbers").select("id")
+            .eq("organization_id", org_id).neq("status", "released").maybeSingle();
+          if (existing) return err("This account already has a number — release it before ordering a new one", 400);
+
+          const order = await telnyx("/number_orders", {
+            method: "POST",
+            body: JSON.stringify({ phone_numbers: [{ phone_number }] }),
+          });
+          const ordered = (order?.data?.phone_numbers || [])[0] as Record<string, unknown> | undefined;
+          if (!ordered?.id) throw new Error("Telnyx order returned no phone number record");
+
+          const { data: row, error } = await adminClient
+            .schema("core").from("phone_numbers")
+            .insert({
+              organization_id: org_id,
+              telnyx_number_id: ordered.id,
+              phone_number,
+              capabilities: capabilities?.length ? capabilities : ["voice"],
+              status: "active",
+            })
+            .select()
+            .single();
+          if (error) throw error;
+          return ok({ success: true, number: row });
+        }
+
+        case "release_phone_number": {
+          const { org_id } = body;
+          if (!org_id) return err("Missing org_id", 400);
+          await assertOrgAccess(adminClient, dashUser, org_id as string);
+          await assertVoiceAllowed(adminClient, org_id as string);
+
+          const { data: number } = await adminClient
+            .schema("core").from("phone_numbers").select("*")
+            .eq("organization_id", org_id).neq("status", "released").maybeSingle();
+          if (!number) return err("No active number to release", 400);
+
+          if (number.telnyx_number_id) {
+            await telnyx(`/phone_numbers/${number.telnyx_number_id}`, { method: "DELETE" });
+          }
+          const { error } = await adminClient
+            .schema("core").from("phone_numbers").delete().eq("id", number.id);
+          if (error) throw error;
+
+          // Number gone → receptionist can't answer; force-disable
+          await adminClient.schema("core").from("voice_configs")
+            .update({ enabled: false, updated_at: new Date().toISOString() })
+            .eq("organization_id", org_id);
+          return ok({ success: true });
+        }
+
         default:
           return err(`Unknown action: ${action}`, 400);
       }
@@ -2320,6 +2510,52 @@
     if (error || !data) {
       throw new Error("Access denied — organization not found or outside your access window");
     }
+  }
+
+  // Voice channel is never available for demo accounts (website chat only).
+  async function assertVoiceAllowed(
+    adminClient: ReturnType<typeof createClient>,
+    orgId: string
+  ): Promise<void> {
+    const { data: orgCheck } = await adminClient
+      .schema("core").from("organizations")
+      .select("is_demo")
+      .eq("id", orgId)
+      .single();
+    if (orgCheck?.is_demo) {
+      throw new Error("Voice is not available for demo accounts");
+    }
+  }
+
+  // The 5 call-proven Telnyx Ultra voices (internal labels: Rachel/Amber/Reed/Carson/Chase).
+  const VOICE_IDS = new Set([
+    "Telnyx.Ultra.10bd4af4-825b-49b8-b8bd-0ca11865536e",
+    "Telnyx.Ultra.a7a59115-2425-4192-844c-1e98ec7d6877",
+    "Telnyx.Ultra.533b2990-5b82-45a4-b9f2-367776972ca6",
+    "Telnyx.Ultra.4df027cb-2920-4a1f-8c34-f21529d5c3fe",
+    "Telnyx.Ultra.59cb0f89-5d66-49f8-b965-f72b252789e0",
+  ]);
+
+  const TELNYX_API = "https://api.telnyx.com/v2";
+
+  // Minimal Telnyx REST helper. Response shapes are inconsistent across
+  // endpoints — callers must check `d.data ?? d` and validate what they need.
+  async function telnyx(path: string, init: RequestInit = {}): Promise<Record<string, unknown>> {
+    const res = await fetch(`${TELNYX_API}${path}`, {
+      ...init,
+      headers: {
+        "Authorization": `Bearer ${Deno.env.get("TELNYX_API_KEY")}`,
+        "Content-Type": "application/json",
+        ...(init.headers || {}),
+      },
+    });
+    const text = await res.text();
+    let json: Record<string, unknown> = {};
+    try { json = JSON.parse(text); } catch { /* leave {} */ }
+    if (!res.ok) {
+      throw new Error(`Telnyx ${res.status}: ${text.slice(0, 300)}`);
+    }
+    return json;
   }
 
   // Demo orgs are fictional businesses — only owners may edit their business

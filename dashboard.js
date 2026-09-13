@@ -1596,6 +1596,17 @@ function voiceNumberSelect(e164) {
   voiceNumberRenderResults();
 }
 
+// Number fee note for the provisioning confirm step — real schedule from
+// system.settings.number_fees (via get_org billingSettings).
+function voiceNumberFeeNote(e164) {
+  const fees = window._orgData.billingSettings?.numberFees || {};
+  const npa = String(e164).replace(/^\+1/, "").slice(0, 3);
+  const type = npa === "800" ? "vanity800" : ["888", "877", "866", "855", "844", "833"].includes(npa) ? "tollfree" : "local";
+  const fee = fees[type];
+  if (!fee || !fee.one_time_cents) return "Local number — included, no number fees.";
+  return `<strong>${escHtml(String(fee.label))}:</strong> $${(fee.one_time_cents / 100).toLocaleString()} one-time${fee.note ? ` (${escHtml(String(fee.note))})` : ""} + $${(fee.monthly_cents / 100).toLocaleString()}/mo — add the monthly fee to this account's price and send the one-time charge.`;
+}
+
 function voiceNumberConfirm() {
   const n = _vnumSearch.results.find(x => x.e164 === _vnumSearch.selected);
   if (!n) return;
@@ -1608,7 +1619,7 @@ function voiceNumberConfirm() {
         ${n.capabilities.map(c => `<span class="badge ${c === "Voice" ? "badge-green" : "badge-gray"}" style="margin-right:4px">${c}</span>`).join("")}
       </div>
       <p class="text-muted" style="font-size:13px;margin-bottom:20px">
-        Included in the voice package — no setup or monthly number fees.<br>
+        ${voiceNumberFeeNote(n.e164)}<br>
         The AI receptionist starts answering as soon as it's enabled.
       </p>
       <div class="flex-row" style="justify-content:center;gap:10px">
@@ -3696,7 +3707,22 @@ function billingSetTerm(term) {
   t.priceDraft = document.getElementById("bill-price")?.value ?? t.priceDraft;
   const fm = document.getElementById("bill-free-months")?.value;
   if (fm !== undefined) t.freeMonthsDraft = fm;
+  t.introPriceDraft = document.getElementById("bill-intro-price")?.value ?? t.introPriceDraft;
+  const ic = document.getElementById("bill-intro-cycles")?.value;
+  if (ic !== undefined) t.introCyclesDraft = ic;
   renderTab();
+}
+
+async function applyPlanTemplate(key, label) {
+  if (!confirm(`Apply the ${label} plan?\n\nThis sets the price, intro schedule, monthly allowance and service activation. Existing custom values are overwritten.`)) return;
+  try {
+    await api("apply_plan_template", { org_id: currentOrgId, template_key: key });
+    toast(`${label} plan applied`, "success");
+    _billingTerm = null; // re-seed from applied values
+    const data = await api("get_org", { org_id: currentOrgId });
+    window._orgData = { ...window._orgData, ...data };
+    renderTab();
+  } catch (e) { toast(e.message, "error"); }
 }
 
 async function billingSavePlan() {
@@ -3711,6 +3737,19 @@ async function billingSavePlan() {
     const fm = parseInt(document.getElementById("bill-free-months")?.value || "0", 10);
     if (!Number.isInteger(fm) || fm < 0 || fm > 24) { toast("Free months must be a whole number 0–24", "error"); return; }
     updates.free_months = fm;
+  }
+  const introPriceStr = document.getElementById("bill-intro-price").value.trim();
+  const introCycles = parseInt(document.getElementById("bill-intro-cycles")?.value || "0", 10);
+  if (!Number.isInteger(introCycles) || introCycles < 0 || introCycles > 12) { toast("Intro cycles must be a whole number 0–12", "error"); return; }
+  updates.intro_cycles_remaining = introCycles;
+  if (introPriceStr !== "") {
+    const ip = parseFloat(introPriceStr);
+    if (!Number.isFinite(ip) || ip < 0) { toast("Enter a valid intro price", "error"); return; }
+    updates.intro_price = ip;
+  } else if (introCycles > 0) {
+    toast("Intro cycles set — add an intro price (or set cycles to 0)", "error"); return;
+  } else {
+    updates.intro_price = null; // cleared along with cycles
   }
   try {
     await api("update_org_billing", { org_id: currentOrgId, updates });
@@ -3799,6 +3838,15 @@ function renderPaymentsTab(el, org) {
   const rateDollars = (bs.pricePer1000Cents / 100).toLocaleString("en-US", { maximumFractionDigits: 2 });
   const priceVal = bt.priceDraft ?? (org.monthly_price_cents != null ? String(org.monthly_price_cents / 100) : "");
   const freeMonthsVal = bt.freeMonthsDraft ?? String(org.free_months ?? 0);
+  const introPriceVal = bt.introPriceDraft ?? (org.intro_price_cents != null ? String(org.intro_price_cents / 100) : "");
+  const introCyclesVal = bt.introCyclesDraft ?? String(org.intro_cycles_remaining ?? 0);
+  const introHint = org.intro_cycles_remaining > 0 && org.intro_price_cents != null
+    ? `Now charging $${(org.intro_price_cents / 100).toLocaleString()}/mo — ${org.intro_cycles_remaining} cycle${org.intro_cycles_remaining === 1 ? "" : "s"} left, then $${((org.monthly_price_cents || 0) / 100).toLocaleString()}/mo.`
+    : "Each monthly renewal uses one cycle; at 0 the standard price applies.";
+  const tplButtons = (bs.planTemplates || []).map(t =>
+    `<button class="btn btn-secondary btn-sm" onclick="applyPlanTemplate('${escAttr(String(t.key))}', '${escAttr(String(t.label))}')"
+      title="${escAttr(`$${(t.monthly_price_cents / 100).toLocaleString()}/mo${t.intro_price_cents ? ` — intro $${t.intro_price_cents / 100}/mo × ${t.intro_cycles}` : ""} · ${Number(t.monthly_credits).toLocaleString()} credits/mo · ${(t.services || []).join(", ")}`)}">Apply ${escHtml(String(t.label))}</button>`
+  ).join("");
 
   el.innerHTML = `
     <div class="card mb-4">
@@ -3812,6 +3860,10 @@ function renderPaymentsTab(el, org) {
     <div class="card mb-4">
       <div class="card-header"><div class="card-title">Plan &amp; Pricing</div></div>
       <div class="card-body">
+        ${tplButtons ? `<div style="margin-bottom:16px">
+          <div class="flex-row" style="margin-bottom:6px">${tplButtons}</div>
+          <div class="text-muted" style="font-size:12px">One-click plans — fill price, intro schedule, allowance and service activation. Everything stays editable after.</div>
+        </div>` : ""}
         <div class="form-row">
           <div class="form-group">
             <label>Monthly price (USD)</label>
@@ -3838,6 +3890,20 @@ function renderPaymentsTab(el, org) {
               Charge 12 months, grant 12 + N. Per-role caps come with RBAC.
             </div>
           </div>` : ""}
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Intro price (USD/mo)</label>
+            <input type="number" id="bill-intro-price" min="0" step="1" value="${introPriceVal}" placeholder="None" />
+            <div class="text-muted" style="font-size:12px;margin-top:4px">
+              Discounted rate for the first cycles — must be ≤ the standard price.
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Intro cycles left</label>
+            <input type="number" id="bill-intro-cycles" min="0" max="12" step="1" value="${introCyclesVal}" />
+            <div class="text-muted" style="font-size:12px;margin-top:4px">${introHint}</div>
+          </div>
         </div>
         <div class="flex-row">
           <button class="btn btn-primary" onclick="billingSavePlan()">Save plan</button>

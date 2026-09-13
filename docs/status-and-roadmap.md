@@ -63,13 +63,13 @@
 ## 3. Remaining work
 
 ### 🔴 Voice channel (NEXT UP)
-- See `voice-channel-plan.md` (approved; note: it references the DROPPED `kb.kb_chunks` and the old tab layout — needs a refresh pass before building). Voice usage will be a service row (`credit_cost` per minute) burning the shared pool — the plumbing is now in place. `messaging.conversations.channel` CHECK still lacks `'voice'` — alter in the voice migration.
+- **UI shell shipped (`356a3e1`, preview-only)** — third pill in Channels (Website Chat / Email / Voice; demos never see it). Status strip (enabled · assistant sync · minutes→Billing), Phone Number card (Softphone-style provisioning modal: area-code search → debounced mock results w/ capability badges → confirm summary; no prices — bundled; US-only, 1/org; typed-confirm release), AI Receptionist card (enable toggle, 6 curated voices w/ browser-TTS preview, greeting w/ counter), Escalation & Fallback card (warm transfer + number, fallback pill: TTS voicemail greeting / forward calls, after-hours pill driven by Business Details hours), Usage card (aggregates only — privacy rule). All session-local mock state, marked "UI preview". Next: Phase 0 latency spike, then Phase 1a backend (`comms.phone_numbers`/`voice_configs`/`calls` + dashboard-api actions + `conversations.channel` CHECK needs `'voice'`). Plan refreshed at `83cfa38` (UI-first order, privacy rule, bundled pricing, demos excluded, kb_versions refs).
 
 ### 🟡 Smaller gaps
 - **Stubbed features (backend wiped 2026-09-11, rebuild planned):** the Team page and the Integrations tab Calendly/Google Calendar cards called 11 dashboard-api actions that never existed in the repo. Owner decision: UI stays, wiring wiped — the Team page renders a "being rebuilt" empty state (Add Member modal opens but submit is stubbed), Calendly/Google Calendar buttons route through a `comingSoon()` toast, hidden auth-link cards + their helpers deleted. Rebuild = implement those actions fresh (`list_team`/`add_team_member`/`update_team_member`/`delete_team_member` + the 7 Calendly/Google Calendar actions).
 - **Business staff editor** — `business_staff` has no UI; fits as a card in KB → Business Details.
 - **MS Graph webhook** — `handle-inbound-email` answers validationToken but has no change-notification processing path (Outlook inbound not flowing).
-- **Voice/SMS channel** — see `voice-channel-plan.md` (approved; note: it references the DROPPED `kb.kb_chunks` and the old tab layout — needs a refresh pass before building).
+- **Voice/SMS channel** — see `voice-channel-plan.md` + the Voice section above (UI shell shipped as preview; backend next).
 
 ### ⚪ Deferred cleanup (owner decides at end)
 - `subscription_tier` (decorative; removal = UI + sales-report changes) and the auto-send pair `auto_send_enabled`/`auto_send_min_confidence` (LIVE for all orgs — removal would change email behavior; needs a product decision, not a cleanup).

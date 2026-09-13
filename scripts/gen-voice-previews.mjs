@@ -16,6 +16,7 @@ const LINE = "Thank you for calling! I'm Horus, your AI assistant. " +
 
 const VOICES = [
   { slug: "rachel", id: "Telnyx.Ultra.10bd4af4-825b-49b8-b8bd-0ca11865536e" },
+  { slug: "amber",  id: "Telnyx.Ultra.a7a59115-2425-4192-844c-1e98ec7d6877" },
   { slug: "reed",   id: "Telnyx.Ultra.533b2990-5b82-45a4-b9f2-367776972ca6" },
   { slug: "carson", id: "Telnyx.Ultra.4df027cb-2920-4a1f-8c34-f21529d5c3fe" },
   { slug: "chase",  id: "Telnyx.Ultra.59cb0f89-5d66-49f8-b965-f72b252789e0" },

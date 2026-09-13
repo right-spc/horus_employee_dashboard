@@ -402,23 +402,7 @@ function showNewOrgModal() {
               <option value="casual">Casual</option>
             </select>
           </div>
-          <div class="form-group">
-            <label>Subscription Tier</label>
-            <select id="new-org-tier">
-              <option value="basic">Basic</option>
-              <option value="pro">Pro</option>
-              <option value="enterprise">Enterprise</option>
-            </select>
-          </div>
         </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label>Subscription Plan</label>
-            <select id="new-org-plan">
-              <option value="monthly">Monthly</option>
-              <option value="yearly">Yearly</option>
-            </select>
-          </div>
         </div>
         <div class="form-group">
           <label>Services</label>
@@ -482,8 +466,6 @@ async function createOrg() {
     const params = {
       name, slug,
       ai_tone: document.getElementById("new-org-tone").value,
-      subscription_tier: document.getElementById("new-org-tier").value,
-      subscription_plan: document.getElementById("new-org-plan").value,
       services: [
         document.getElementById("new-org-svc-webchat").checked ? "webchat" : null,
         document.getElementById("new-org-svc-email").checked ? "email" : null,
@@ -540,13 +522,6 @@ function showNewDemoModal() {
               <option value="casual">Casual</option>
             </select>
           </div>
-          <div class="form-group">
-            <label>Subscription Tier</label>
-            <select id="demo-tier">
-              <option value="basic">Basic</option>
-              <option value="pro">Pro</option>
-              <option value="enterprise">Enterprise</option>
-            </select>
           </div>
         </div>
         <div class="form-row">
@@ -586,7 +561,6 @@ async function createDemo() {
     const { org } = await api("create_demo", {
       name, slug,
       ai_tone: document.getElementById("demo-tone").value,
-      subscription_tier: document.getElementById("demo-tier").value,
       message_limit_per_month: parseInt(document.getElementById("demo-limit").value),
       auto_send_min_confidence: parseFloat(document.getElementById("demo-confidence").value),
     });
@@ -3124,24 +3098,10 @@ function renderSettingsTab(el, org) {
         </div>
         <div class="form-row">
           <div class="form-group">
-            <label>Subscription Tier</label>
-            <select id="s-tier">
-              ${["basic","pro","enterprise"].map(t =>
-                `<option value="${t}" ${org.subscription_tier===t?"selected":""}>${t.charAt(0).toUpperCase()+t.slice(1)}</option>`
-              ).join("")}
-            </select>
-          </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label>Subscription Plan</label>
-            <select id="s-plan">
-              <option value="monthly" ${org.subscription_plan==="monthly"?"selected":""}>Monthly</option>
-              <option value="yearly" ${org.subscription_plan==="yearly"?"selected":""}>Yearly</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <!-- spacer to keep the grid even -->
+            <label>Plan &amp; Pricing</label>
+            <div class="text-muted" style="font-size:13px;padding-top:6px">
+              Term, price and renewal live on the <strong>Billing</strong> tab now — no tiers, no preset plans.
+            </div>
           </div>
         </div>
         <div class="form-row">
@@ -3236,8 +3196,7 @@ async function saveOrgSettings() {
   const updates = {
     name: document.getElementById("s-name").value.trim(),
     slug: document.getElementById("s-slug").value.trim(),
-    subscription_tier: document.getElementById("s-tier").value,
-    subscription_plan: document.getElementById("s-plan").value,
+    // tier/plan selects removed — term & price live on the Billing tab now
   };
   if (isOwner) {
     updates.auto_send_min_confidence = parseFloat(document.getElementById("s-confidence").value);
@@ -3716,53 +3675,64 @@ function loadPayPalSDK() {
 // Dynamic model: activated services + one free-form monthly price + monthly
 // credit allowance + 1-cycle rollover + never-expiring addons. No plan names,
 // no preset prices — presets are dead.
-// Price / term / free-months / rollover run on session-local mock state
-// (_billingMock) until the pricing schema lands — marked "UI preview".
-// Services, credit buckets, addon credits and payment history are REAL data.
+// All real data: price/term/free-months persist via update_org_billing (floor
+// enforced server-side from system.settings), rollover via update_pool,
+// service activation via update_service (open to staff until RBAC locks it).
 
-let _billingMock = null; // per-org mock state, built by billingMockState()
+// Term-pill selection is local draft state until "Save plan"; input drafts
+// survive pill switches (they re-render the card).
+let _billingTerm = null; // { orgId, term, priceDraft?, freeMonthsDraft? }
 
-function billingMockState(orgId) {
-  if (_billingMock && _billingMock.orgId === orgId) return _billingMock;
-  _billingMock = {
-    orgId,
-    price: 500,            // monthly price (USD) — floor-enforced server-side later
-    term: "monthly",       // monthly | yearly
-    freeMonths: 0,         // extra months granted on yearly renewal (RBAC-capped later)
-    rolloverEnabled: true, // monthly credits carry exactly 1 cycle when on
-    rolloverCredits: 0,    // bucket balance — real column lands with the migration
-    voiceEnabled: false,   // mock until the voice org_services row is seeded
-  };
-  return _billingMock;
+function billingTerm(org) {
+  if (!_billingTerm || _billingTerm.orgId !== org.id) {
+    _billingTerm = { orgId: org.id, term: org.subscription_plan === "yearly" ? "yearly" : "monthly" };
+  }
+  return _billingTerm;
 }
 
-// MOCK per-service minimum monthly prices — real values will live in the DB
-// (system settings), and the enforced floor = Σ minimums of ACTIVE services.
-const SERVICE_MIN_MOCK = { webchat: 100, email: 50, voice: 200 };
-
-function billingPreviewToast() {
-  toast("UI preview — dynamic pricing isn't wired yet, nothing was saved.", "default");
-}
-
-function billingMockField(key, value) {
-  _billingMock[key] = value;
+function billingSetTerm(term) {
+  const t = _billingTerm;
+  t.term = term;
+  t.priceDraft = document.getElementById("bill-price")?.value ?? t.priceDraft;
+  const fm = document.getElementById("bill-free-months")?.value;
+  if (fm !== undefined) t.freeMonthsDraft = fm;
   renderTab();
-  billingPreviewToast();
 }
 
-function billingSavePlan() {
-  const price = parseFloat(document.getElementById("bill-price").value);
-  if (!Number.isFinite(price) || price < 0) { toast("Enter a valid monthly price", "error"); return; }
-  _billingMock.price = price;
-  if (_billingMock.term === "yearly") {
-    _billingMock.freeMonths = parseInt(document.getElementById("bill-free-months")?.value || "0", 10) || 0;
+async function billingSavePlan() {
+  const updates = { subscription_plan: _billingTerm.term };
+  const priceStr = document.getElementById("bill-price").value.trim();
+  if (priceStr !== "") {
+    const price = parseFloat(priceStr);
+    if (!Number.isFinite(price) || price < 0) { toast("Enter a valid monthly price", "error"); return; }
+    updates.monthly_price = price;
   }
-  const floor = _billingMock.activeFloor || 0;
-  if (price < floor) {
-    toast(`Below the $${floor.toLocaleString()}/mo floor for the active services — this save would need an authorized override.`, "error");
-    return;
+  if (updates.subscription_plan === "yearly") {
+    const fm = parseInt(document.getElementById("bill-free-months")?.value || "0", 10);
+    if (!Number.isInteger(fm) || fm < 0 || fm > 24) { toast("Free months must be a whole number 0–24", "error"); return; }
+    updates.free_months = fm;
   }
-  billingPreviewToast();
+  try {
+    await api("update_org_billing", { org_id: currentOrgId, updates });
+    toast("Plan saved", "success");
+    _billingTerm = null; // re-seed from saved org data
+    const data = await api("get_org", { org_id: currentOrgId });
+    window._orgData = { ...window._orgData, ...data };
+    renderTab();
+  } catch (e) { toast(e.message, "error"); } // server floor message shows as-is
+}
+
+async function toggleRollover(poolId, enabled) {
+  try {
+    await api("update_pool", { org_id: currentOrgId, pool_id: poolId, updates: { rollover_enabled: enabled } });
+    toast(enabled ? "Rollover on — unused monthly credits carry 1 cycle" : "Rollover off — unused monthly credits forfeit at reset", "success");
+    const data = await api("get_org", { org_id: currentOrgId });
+    window._orgData = { ...window._orgData, ...data };
+    renderTab();
+  } catch (e) {
+    toast(e.message, "error");
+    renderTab(); // revert the toggle
+  }
 }
 
 // The pool reset cron anchors on subscription_end_date day-of-month — this is
@@ -3781,41 +3751,36 @@ const SERVICE_LABELS = { webchat: "Website Chat", email: "Email", voice: "Voice"
 const CHANNEL_ORDER = ["webchat", "email", "voice"];
 
 function renderPaymentsTab(el, org) {
-  const m = billingMockState(org.id);
+  const bt = billingTerm(org);
   const pools = window._orgData.pools || [];
   const services = window._orgData.services || [];
   const pool = pools.find(p => p.pool === "credits") || pools[0] || null;
+  const bs = window._orgData.billingSettings || { minMonthlyCredits: 1000, pricePer1000Cents: 5900 };
 
-  // Credits math — real columns today; rollover bucket is mock until the migration lands
+  // Credits math — all real: rollover bucket (1-cycle), monthly, addon
   const limit = pool?.monthly_limit || 0;
   const used = pool?.used_this_month || 0;
   const monthlyLeft = Math.max(0, limit - used);
   const addon = pool?.addon_credits || 0;
-  const rollover = m.rolloverEnabled ? m.rolloverCredits : 0;
+  const rolloverOn = pool?.rollover_enabled ?? true;
+  const rollover = pool?.rollover_credits || 0;
   const available = rollover + monthlyLeft + addon;
   const pct = limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0;
   const fillClass = pct >= 100 ? "danger" : pct >= 80 ? "warning" : "";
   const resetStr = creditCycleResetDate(org).toLocaleDateString("en-US", { month: "long", day: "numeric" });
   const suspended = !!pool?.limit_exceeded_at;
 
-  // Services — the 3 channels; seeded rows get real toggles, voice gets a mock
-  // toggle until its org_services row is seeded by the migration
-  const activeChannels = [];
+  // Services — the 3 channels; non-demo orgs all have seeded rows (real toggles)
   const serviceRows = CHANNEL_ORDER.map(ch => {
     const s = services.find(x => x.service === ch);
     if (!s) {
-      if (m.voiceEnabled) activeChannels.push(ch);
       return `<tr>
-        <td class="font-semibold">${SERVICE_LABELS[ch]} <span class="badge badge-blue" style="margin-left:6px">preview</span></td>
+        <td class="font-semibold">${SERVICE_LABELS[ch]}</td>
         <td class="text-sm">${ch === "voice" ? "10 credits / minute" : "—"}</td>
-        <td>
-          <label class="toggle"><input type="checkbox" ${m.voiceEnabled ? "checked" : ""}
-            onchange="billingMockField('voiceEnabled', this.checked)"><span class="toggle-slider"></span></label>
-        </td>
+        <td><span class="badge badge-gray">${currentIsDemo ? "not available for demos" : "not seeded"}</span></td>
         <td></td>
       </tr>`;
     }
-    if (s.enabled) activeChannels.push(ch);
     return `<tr>
       <td class="font-semibold">${SERVICE_LABELS[ch]}</td>
       <td class="text-sm">${s.credit_cost} credit${s.credit_cost === 1 ? "" : "s"} / ${ch === "voice" ? "minute" : "message"}</td>
@@ -3827,11 +3792,13 @@ function renderPaymentsTab(el, org) {
     </tr>`;
   }).join("");
 
-  // Dynamic floor: Σ per-service minimums over ACTIVE services (mock values
-  // until the DB settings land) — shown as small text under the price input
-  const activeFloor = activeChannels.reduce((sum, ch) => sum + (SERVICE_MIN_MOCK[ch] || 0), 0);
-  m.activeFloor = activeFloor;
-  const floorBreakdown = activeChannels.map(ch => `${SERVICE_LABELS[ch]} $${SERVICE_MIN_MOCK[ch]}`).join(" + ");
+  // Price floor = monthly allowance × per-1000 rate (system.settings via get_org);
+  // the SERVER enforces it — this text is display-only
+  const floorCents = Math.ceil((limit * bs.pricePer1000Cents) / 1000);
+  const floorDollars = (floorCents / 100).toLocaleString("en-US", { maximumFractionDigits: 2 });
+  const rateDollars = (bs.pricePer1000Cents / 100).toLocaleString("en-US", { maximumFractionDigits: 2 });
+  const priceVal = bt.priceDraft ?? (org.monthly_price_cents != null ? String(org.monthly_price_cents / 100) : "");
+  const freeMonthsVal = bt.freeMonthsDraft ?? String(org.free_months ?? 0);
 
   el.innerHTML = `
     <div class="card mb-4">
@@ -3843,34 +3810,30 @@ function renderPaymentsTab(el, org) {
     </div>
 
     <div class="card mb-4">
-      <div class="card-header"><div class="card-title">Plan &amp; Pricing</div>
-        <span class="badge badge-blue" style="margin-left:auto">UI preview</span>
-      </div>
+      <div class="card-header"><div class="card-title">Plan &amp; Pricing</div></div>
       <div class="card-body">
         <div class="form-row">
           <div class="form-group">
             <label>Monthly price (USD)</label>
-            <input type="number" id="bill-price" min="0" step="1" value="${m.price}" />
+            <input type="number" id="bill-price" min="0" step="1" value="${priceVal}" placeholder="Not set" />
             <div class="text-muted" style="font-size:12px;margin-top:4px">
-              ${activeChannels.length === 0
-                ? "No services active — no minimum applies."
-                : `Minimum for the active services: <strong>$${activeFloor.toLocaleString()}/mo</strong> <span style="opacity:.75">(${floorBreakdown} — mock values, will live in the database)</span>. Below-floor saves need an authorized override.`}
+              Minimum for this account: <strong>$${floorDollars}/mo</strong> <span style="opacity:.75">(${limit.toLocaleString()} credits × $${rateDollars} per 1,000 — rates live in the database)</span>. Below-floor saves need an authorized override.
             </div>
           </div>
           <div class="form-group">
             <label>Renewal term</label>
             <div class="flex-row">
-              <button class="btn ${m.term === "monthly" ? "btn-primary" : "btn-secondary"} btn-sm" onclick="billingMockField('term', 'monthly')">Monthly</button>
-              <button class="btn ${m.term === "yearly" ? "btn-primary" : "btn-secondary"} btn-sm" onclick="billingMockField('term', 'yearly')">Yearly</button>
+              <button class="btn ${bt.term === "monthly" ? "btn-primary" : "btn-secondary"} btn-sm" onclick="billingSetTerm('monthly')">Monthly</button>
+              <button class="btn ${bt.term === "yearly" ? "btn-primary" : "btn-secondary"} btn-sm" onclick="billingSetTerm('yearly')">Yearly</button>
             </div>
             <div class="text-muted" style="font-size:12px;margin-top:4px">
               Renews ${org.subscription_end_date ? new Date(org.subscription_end_date).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }) : "—"}
             </div>
           </div>
-          ${m.term === "yearly" ? `
+          ${bt.term === "yearly" ? `
           <div class="form-group">
             <label>Free months on renewal</label>
-            <input type="number" id="bill-free-months" min="0" max="12" step="1" value="${m.freeMonths}" />
+            <input type="number" id="bill-free-months" min="0" max="24" step="1" value="${freeMonthsVal}" />
             <div class="text-muted" style="font-size:12px;margin-top:4px">
               Charge 12 months, grant 12 + N. Per-role caps come with RBAC.
             </div>
@@ -3893,12 +3856,12 @@ function renderPaymentsTab(el, org) {
           <div class="stat-card">
             <div class="stat-label">Rollover</div>
             <div class="stat-value stat-value-md">${rollover.toLocaleString()}</div>
-            <div class="stat-sub">${m.rolloverEnabled ? `leftover monthly from last cycle · dies ${resetStr}` : "off — monthly credits won't carry"}</div>
+            <div class="stat-sub">${rollover > 0 ? `leftover from last cycle · dies ${resetStr}` : rolloverOn ? "on — leftovers carry 1 cycle at reset" : "off — monthly credits won't carry"}</div>
           </div>
           <div class="stat-card">
             <div class="stat-label">Monthly</div>
             <div class="stat-value stat-value-md">${monthlyLeft.toLocaleString()} <span class="text-muted" style="font-size:13px;font-weight:400">/ ${limit.toLocaleString()}</span></div>
-            <div class="stat-sub">resets ${resetStr} · unused ${m.rolloverEnabled ? "rolls 1 cycle" : "is forfeited"}</div>
+            <div class="stat-sub">resets ${resetStr} · unused ${rolloverOn ? "rolls 1 cycle" : "is forfeited"}</div>
           </div>
           <div class="stat-card">
             <div class="stat-label">Addon</div>
@@ -3922,8 +3885,10 @@ function renderPaymentsTab(el, org) {
             <div class="toggle-label">Rollover</div>
             <div class="toggle-desc">Unused monthly credits carry into the next cycle only, then expire. When every bucket runs out, the account is suspended.</div>
           </div>
-          <label class="toggle"><input type="checkbox" ${m.rolloverEnabled ? "checked" : ""}
-            onchange="billingMockField('rolloverEnabled', this.checked)"><span class="toggle-slider"></span></label>
+          ${isOwner && pool
+            ? `<label class="toggle"><input type="checkbox" ${rolloverOn ? "checked" : ""}
+                onchange="toggleRollover('${pool.id}', this.checked)"><span class="toggle-slider"></span></label>`
+            : `<span class="badge badge-${rolloverOn ? "green" : "gray"}">${rolloverOn ? "On" : "Off"}</span>`}
         </div>
       </div>
     </div>

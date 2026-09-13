@@ -87,6 +87,7 @@
     display_name: string;
     role: "owner" | "salesperson";
     is_active: boolean;
+    can_override_price_floor: boolean;
   }
 
   // ── Main Handler ─────────────────────────────────────────────────────────────
@@ -130,7 +131,7 @@
     // Look up dashboard user record and role
     const { data: dashUser, error: dashError } = await adminClient
       .schema("core").from("dashboard_users")
-      .select("id, display_name, role, is_active")
+      .select("id, display_name, role, is_active, can_override_price_floor")
       .eq("id", user.id)
       .single<DashboardUser>();
 
@@ -345,7 +346,9 @@
             }
           }
 
-          return ok({ org, providers: providers || [], widget, kbDocs, lastPayment, conversationStats, client, notes: notes || [], pools: pools || [], services: services || [] });
+          const billingSettings = await getBillingSettings(adminClient);
+
+          return ok({ org, providers: providers || [], widget, kbDocs, lastPayment, conversationStats, client, notes: notes || [], pools: pools || [], services: services || [], billingSettings });
         }
 
         // ── Add org note (account history) ──────────────────────────────────
@@ -551,17 +554,19 @@
           });
           const svcList = (Array.isArray(services) ? services : ["webchat", "email"])
             .filter((s: unknown) => s === "webchat" || s === "email");
-          if (svcList.length > 0) {
-            await adminClient.schema("core").from("org_services").insert(
-              svcList.map((s: string) => ({
-                organization_id: org.id,
-                service: s,
-                enabled: true,
-                usage_pool: "credits",
-                credit_cost: 1,
-              }))
-            );
-          }
+          await adminClient.schema("core").from("org_services").insert([
+            ...svcList.map((s: string) => ({
+              organization_id: org.id,
+              service: s,
+              enabled: true,
+              usage_pool: "credits",
+              credit_cost: 1,
+            })),
+            // Every real org gets a voice row (off, 10 credits/min) so the
+            // billing/channel toggles can activate it without extra setup.
+            { organization_id: org.id, service: "voice", enabled: false, usage_pool: "credits", credit_cost: 10 },
+          ]);
+          await adminClient.schema("voice").from("configs").insert({ organization_id: org.id });
 
           return ok({ org });
         }
@@ -1048,6 +1053,11 @@
           if (typeof updates.monthly_limit !== "undefined") {
             const v = Math.floor(Number(updates.monthly_limit));
             if (!Number.isFinite(v) || v < 0) return err("monthly_limit must be a non-negative integer", 400);
+            // Allowance floor lives in the DB (system.settings) — below it needs the override permission
+            const { minMonthlyCredits } = await getBillingSettings(adminClient);
+            if (v < minMonthlyCredits && !canOverrideFloor(dashUser)) {
+              return err(`Allowance can't go below ${minMonthlyCredits.toLocaleString()} credits/mo — an authorized teammate can approve lower.`, 400);
+            }
             row.monthly_limit = v;
           }
           if (typeof updates.addon_credits !== "undefined") {
@@ -1055,6 +1065,9 @@
             if (!Number.isFinite(v) || v < 0) return err("addon_credits must be a non-negative integer", 400);
             row.addon_credits = v;
             if (v > 0) row.limit_exceeded_at = null; // fresh credits restore service
+          }
+          if (typeof updates.rollover_enabled !== "undefined") {
+            row.rollover_enabled = !!updates.rollover_enabled;
           }
 
           const { error } = await adminClient
@@ -1066,8 +1079,56 @@
           return ok({ success: true });
         }
 
+        case "update_org_billing": {
+          // Dynamic pricing: free-form monthly price + renewal term + free months.
+          // Price floor = monthly allowance x price-per-1000 rate (system.settings);
+          // below-floor saves need can_override_price_floor (owners pass implicitly).
+          const { org_id, updates } = body as { org_id: string; updates: Record<string, unknown> };
+          if (!org_id || !updates) return err("Missing org_id or updates", 400);
+          await assertOrgAccess(adminClient, dashUser, org_id);
+
+          const row: Record<string, unknown> = {};
+          if (typeof updates.monthly_price !== "undefined") {
+            const dollars = Number(updates.monthly_price);
+            if (!Number.isFinite(dollars) || dollars < 0) return err("monthly_price must be a non-negative number", 400);
+            const cents = Math.round(dollars * 100);
+            const { pricePer1000Cents } = await getBillingSettings(adminClient);
+            const { data: pool } = await adminClient
+              .schema("core").from("org_usage_pools")
+              .select("monthly_limit")
+              .eq("organization_id", org_id).eq("pool", "credits")
+              .maybeSingle();
+            const limit = pool?.monthly_limit ?? 0;
+            const floorCents = Math.ceil((limit * pricePer1000Cents) / 1000);
+            if (cents < floorCents && !canOverrideFloor(dashUser)) {
+              const fmt = (c: number) => `$${(c / 100).toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
+              return err(`Below the ${fmt(floorCents)}/mo minimum for this account (${limit.toLocaleString()} credits × ${fmt(pricePer1000Cents)} per 1,000) — an authorized teammate can approve lower.`, 400);
+            }
+            row.monthly_price_cents = cents;
+          }
+          if (typeof updates.subscription_plan !== "undefined") {
+            if (!["monthly", "yearly"].includes(updates.subscription_plan as string)) return err("subscription_plan must be monthly or yearly", 400);
+            row.subscription_plan = updates.subscription_plan;
+          }
+          if (typeof updates.free_months !== "undefined") {
+            const v = Math.floor(Number(updates.free_months));
+            if (!Number.isInteger(v) || v < 0 || v > 24) return err("free_months must be an integer 0–24", 400);
+            row.free_months = v;
+          }
+          if (Object.keys(row).length === 0) return err("Nothing to update", 400);
+
+          const { data: saved, error } = await adminClient
+            .schema("core").from("organizations")
+            .update(row)
+            .eq("id", org_id)
+            .select("monthly_price_cents, subscription_plan, free_months")
+            .single();
+          if (error) throw error;
+          return ok({ success: true, billing: saved });
+        }
+
         case "update_service": {
-          if (!isOwner) return err("Only owners can edit services", 403);
+          // Service activation is open to all staff for now — RBAC locks it later.
           const { org_id, service_id, updates } = body as {
             org_id: string; service_id: string; updates: Record<string, unknown>;
           };
@@ -2512,6 +2573,24 @@
     }
   }
 
+  // ── Billing settings (floor values live in the DB, never in code) ──────────
+  async function getBillingSettings(
+    adminClient: ReturnType<typeof createClient>
+  ): Promise<{ minMonthlyCredits: number; pricePer1000Cents: number }> {
+    const { data } = await adminClient.schema("system").from("settings").select("key, value");
+    const map = Object.fromEntries((data || []).map((r) => [r.key as string, Number(r.value)]));
+    return {
+      minMonthlyCredits: map.min_monthly_credits ?? 1000,
+      pricePer1000Cents: map.price_per_1000_credits_cents ?? 5900,
+    };
+  }
+
+  // Owners pass implicitly; everyone else needs the explicit permission flag.
+  // (Role "owner" becomes "admin" in the RBAC batch.)
+  function canOverrideFloor(dashUser: DashboardUser): boolean {
+    return dashUser.role === "owner" || !!dashUser.can_override_price_floor;
+  }
+
   // Voice channel is never available for demo accounts (website chat only).
   async function assertVoiceAllowed(
     adminClient: ReturnType<typeof createClient>,
@@ -2624,7 +2703,7 @@
   ): Promise<{ ok: boolean; newEndDate?: string; error?: string; status?: number }> {
     const { data: currentOrg, error: fetchErr } = await adminClient
       .schema("core").from("organizations")
-      .select("subscription_plan, subscription_end_date, billing_day_of_month")
+      .select("subscription_plan, subscription_end_date, billing_day_of_month, free_months")
       .eq("id", orgId)
       .single();
 
@@ -2639,9 +2718,11 @@
       ? new Date(currentOrg.subscription_end_date)
       : now;
 
-    // Yearly plan grants 14 months of service (2 bonus months as advertised).
+    // Yearly renewal grants 12 + the org's configured free months (deal term,
+    // set via update_org_billing; per-role caps come with the RBAC batch).
+    const freeMonths = Math.min(Math.max(Number(currentOrg.free_months) || 0, 0), 24);
     const newEndDate = renewPlan === "yearly"
-      ? addCalendarMonths(baseDate, 14)
+      ? addCalendarMonths(baseDate, 12 + freeMonths)
       : addCalendarMonths(baseDate, 1);
 
     const { error: updateErr } = await adminClient

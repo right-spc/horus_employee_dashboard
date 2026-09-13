@@ -1,7 +1,17 @@
 # Horus Desk — Voice & Telephony Channel Plan
 
-> Status: **APPROVED for planning — no work started**. Build begins when the owner says go (earliest: next week after 2026-09-07).
+> Status: **APPROVED — UI-first build** (UI shell before Phase 0 spike, owner decision 2026-09-11).
 > This document is the single source of truth for the voice channel project. SMS design is owned by the owner and is referenced here only where it intersects with voice.
+
+> **2026-09-11 revision** (supersedes older sections where they conflict):
+> - **KB architecture**: `kb.kb_chunks` was DROPPED. The KB is now `kb.kb_versions` (sections JSONB) with whole-KB injection. "Same KB, zero duplication" now means: voice instructions = the same `buildSystemPrompt` output (version-based) + voice wrapper. `loadAllKbChunks` → version loader.
+> - **Dashboard layout**: no "Phone" org tab. Voice lives in the **Channels tab as a third pill** (`Website Chat · Email · Voice`; SMS later). **Demo orgs get NO voice** — website chat only.
+> - **Privacy model (hard rule)**: employees see **aggregate usage only** — calls answered, total minutes, average duration, credits burned. NO caller numbers, NO per-call rows, NO recordings, NO transcripts anywhere in the employee dashboard. Conversations land in the CUSTOMER's inbox (channel `voice`). Employee APIs must not expose `comms.calls` rows.
+> - **Recording cut from v1** — employees can't access recordings anyway; no reason to generate/store them.
+> - **Fallback routing (new)**: when voice is disabled, the credit pool is exhausted, or after-hours says so → per-org fallback: `forward` (ring straight through to a forwarding number, no AI) or `voicemail` (caller hears a spoken greeting + leaves a message). Voicemail greeting = **typed text spoken via TTS** in the account's chosen voice (no audio upload in v1).
+> - **Bundled pricing**: clients are NOT charged per number ($1/mo) or per-minute line items — everything is inside the voice package. The provisioning UI shows NO prices.
+> - **Credit pools live**: voice is an `core.org_services` row (`service='voice'`) burning the shared pool at `credit_cost` per minute (10/min placeholder — owner sets final rate). `is_pool_exceeded(org,'voice')` gates call answering.
+> - **Provisioning UX**: mirrors the Softphone app's AddNumberModal (area-code search → debounced live results w/ capability badges → pick → confirm), simplified: US-only, one number per org, no pricing display. `conversations.channel` CHECK constraint still lacks `'voice'` — alter in the voice migration.
 
 ---
 
@@ -19,7 +29,7 @@ A third customer-facing channel: **voice**. Each client org gets a real US phone
 | LLM | **`moonshotai/Kimi-K2.6`, thinking disabled** | Telnyx's designated voice model; co-located GPUs = sub-second response; ~$0.004/min; same model as chat/email = consistent answers. Thinking tokens disabled (reasoning delay = dead air on calls). Model is one config field per assistant → per-org override (e.g. `anthropic/claude-haiku-4-5`, native on Telnyx) possible later with zero architecture change |
 | Assistant topology | **One Telnyx AI Assistant per org** | Per-tenant prompt-caching economics (same static-prefix trick as chat), per-org voice/greeting, isolation. Assistant `instructions` = our generated system prompt |
 | Call routing | **Call Control webhook path** (NOT direct number→assistant assignment in the Telnyx portal) | Keeps us in the loop before answering: billing, usage caps, after-hours mode, blocked callers, logging |
-| Knowledge base | **Same `kb.kb_chunks`, zero duplication** | Voice instructions = same `buildSystemPrompt` output + a voice-style wrapper (no markdown, one question at a time, speak numbers naturally, keep it short). Assistant re-synced via API on every KB/config save |
+| Knowledge base | **Same versioned KB, zero duplication** | Voice instructions = same `buildSystemPrompt` output (from `kb.kb_versions` — chunks table dropped) + a voice-style wrapper (no markdown, one question at a time, speak numbers naturally, keep it short). Assistant re-synced via API on every KB/config save |
 | Warm transfer | **Supported, per-org toggle** | Level 1: announced transfer w/ voicemail detection (human answers → bridged; voicemail/no answer → AI takes call back, message-taking). Level 2 (later): true 3-way warm handoff via Telnyx multi-participant calls (AI briefs human privately, then bridges). Default escalation = message-taking + notification (same as chat/email today) |
 | AI sends texts mid-call | **Yes, via `send_text` webhook tool** | Booking confirmations, email addresses, links — sent from the SAME number the customer called. Gate: number must have SMS capability (+$0.10/mo) AND 10DLC/toll-free registration cleared, else carriers filter/fine |
 | Pricing to clients | **Owner's domain — out of scope here** | This plan covers only Horus-side costs and technical build |
@@ -84,13 +94,15 @@ Prove quality before building product surface:
 **1a. DB migration** (`supabase/migrations/`):
 - `comms.phone_numbers` — id, organization_id, telnyx_number_id, phone_number (E.164), capabilities (sms/voice), status, monthly_cost_cents
 - `comms.calls` — id, organization_id, conversation_id (nullable), telnyx_call_control_id (unique), direction, from/to, assistant_id, timestamps, duration_seconds, recording_url, engine_minutes, llm token counts, cost_usd, outcome (completed/transferred/message_taken/abandoned), hangup_reason
-- `comms.voice_configs` — organization_id PK, enabled, telnyx_assistant_id, tts_voice, greeting_text, after_hours_mode ('answer'/'message'), transfer_enabled, transfer_number, recording_enabled, max_monthly_minutes, instructions_version, synced_at
+- `comms.voice_configs` — organization_id PK, enabled, telnyx_assistant_id, tts_voice, greeting_text, after_hours_mode ('answer'/'fallback'), transfer_enabled, transfer_number, **fallback_mode ('forward'/'voicemail'), fallback_number, voicemail_greeting**, max_monthly_minutes (legacy — superseded by the credit pool), instructions_version, synced_at. NO recording_enabled (recording cut from v1 — privacy rule)
+- **`messaging.conversations.channel` CHECK: ALTER to add 'voice'** (currently missing — verified 2026-09-11)
+- `core.org_services` row for voice per org (usage_pool 'credits', credit_cost 10/min placeholder) — the credit-pool migration (20260915000000) already built this machinery
 - Verify `messaging.conversations.channel` has no CHECK constraint blocking 'voice' (alter if needed)
 - Verify `crm.contact_aliases` accepts phone aliases (callers merge with email/chat contacts)
 - Grants per schema-reorg pattern; `comms` already in PostgREST schema list ✓
 
 **1b. Shared prompt extraction:**
-- Extract `buildSystemPrompt` + `loadAllKbChunks` from widget-chat into `supabase/functions/_shared/horus-prompt.ts`; widget-chat + handle-inbound-email import it (pure refactor, redeploy both)
+- Extract `buildSystemPrompt` + the KB-version loader from widget-chat into `supabase/functions/_shared/horus-prompt.ts`; widget-chat + handle-inbound-email import it (pure refactor, redeploy both)
 - Add `buildVoiceInstructions()`: same content + voice-style wrapper
 
 **1c. Edge functions** (all `verify_jwt=false`, deploy `--no-verify-jwt`, Ed25519 webhook signature verification):
@@ -102,20 +114,31 @@ Prove quality before building product surface:
 
 **1e. Number provisioning (server side):** dashboard-api endpoints — search available numbers, purchase, attach to Call Control app, insert row, create+sync assistant; release flow
 
-### Phase 2 — Employee dashboard UI (~1–2 days, this repo)
+### Phase 2 — Employee dashboard UI (BUILT FIRST, shell + mock data)
 
-Fits existing structure (top nav: Organizations/Demos/Sales/Team; org tabs: Overview, Email Setup, Widget, KB, Integrations, Payments, Reports, Settings). No new top-level views.
+Per owner 2026-09-11: the UI is built BEFORE the Phase 0 spike, as a working shell against mock/stub data, so the spike's real API responses only need wiring in. Follows the existing Channels-tab pill pattern (dashboard.js single-file, no framework).
 
-1. **New org tab "Phone"**:
-   - Number: current number, search-by-area-code → buy flow, release w/ guard
-   - Voice: enable toggle, voice picker (4–6 curated voices w/ ▶ preview), greeting text, after-hours mode, warm transfer (toggle + number), recording toggle, monthly minute cap, assistant sync status indicator
-   - SMS: capability + 10DLC/toll-free registration status (unregistered → pending → approved) + registration wizard
-   - "Test it" call-now prompt
-2. **Overview tab**: channel status pills (Chat/Email/Voice/SMS) + monthly voice minutes & SMS counts
-3. **Reports tab**: calls, voice minutes, per-channel cost, SMS volume (from comms.calls + analytics)
-4. **Call log** (in Reports or own tab): comms.calls table → detail with transcript (chat-style) + recording audio player
-5. **Demos view**: demo orgs get voice too — sales pitch becomes "call this number and talk to the AI right now"
-6. Follow existing dashboard.js single-file patterns, no framework
+**Channels tab → Voice pill** (hidden for demo orgs), top → bottom:
+
+1. **Status strip** — voice enabled state · assistant sync status (`Synced ✓ / Syncing… / Stale`) · minutes this cycle (from the shared credit pool, link to Billing tab)
+2. **Phone Number card**
+   - No number: explainer + "Get a Phone Number" → provisioning modal (Softphone-style): area-code input → debounced live search (`dashboard-api search_available_numbers`, Telnyx `available_phone_numbers` filtered US local) → results with capability badges → select ONE → confirm step (NO prices — "included in the voice package") → `order_phone_number` → number row in `comms.phone_numbers`
+   - Has number: formatted number + copy button, capability badges (Voice / SMS), "Release number" behind typed-confirm guard (`release_phone_number` → Telnyx `DELETE /phone_numbers/{id}`)
+3. **AI Receptionist card**
+   - Enabled toggle (master switch)
+   - Voice picker: 4–6 curated TTS voices as selectable rows w/ ▶ preview clip, saved per org (`voice_configs.tts_voice`)
+   - Greeting text textarea w/ live counter (`voice_configs.greeting_text`)
+4. **Escalation & Fallback card**
+   - Warm transfer: toggle + transfer-to number (`transfer_enabled`, `transfer_number`; no-answer → AI takes call back, message-taking)
+   - Fallback when disabled / pool exhausted / after-hours: pill `Forward calls` (fallback_number input) vs `Voicemail` (voicemail_greeting textarea, spoken via TTS in the org's voice)
+   - After-hours mode: `Answer anyway` / `Use fallback` (reads `business_hours` + timezone from KB → Business Details)
+5. **Usage card (aggregate ONLY — privacy rule)**
+   - This cycle: calls answered · total minutes · average duration · credits burned
+   - Hard rule: no caller numbers, no per-call rows, no recordings, no transcripts. dashboard-api returns only `count/sum/avg` aggregates.
+
+**Other touchpoints:** Overview tab gains a Voice line in the Services card (enabled state + minutes this cycle); Billing → Services & Burn Rates shows the `voice` row (burn rate per minute, owner-editable); new-org modal services picker enables the Voice checkbox (currently disabled "soon").
+
+**Explicitly NOT in the employee dashboard:** call log, recordings player, transcripts, caller numbers, voicemail inbox (all customer-domain).
 
 ### Phase 3 — Outbound calls (DEFERRED, separate approval)
 

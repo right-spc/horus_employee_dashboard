@@ -279,7 +279,7 @@ async function onAnswered(p: Payload): Promise<void> {
       language: "en-US",
     });
   } else if (cfg.telnyx_assistant_id) {
-    await callAction(ccid, "ai_assistant_start", { assistant_id: cfg.telnyx_assistant_id });
+    await callAction(ccid, "ai_assistant_start", { assistant: { id: cfg.telnyx_assistant_id } });
   } else {
     await callAction(ccid, "hangup").catch(() => {});
   }
@@ -438,12 +438,14 @@ async function onConversationEnded(p: Payload): Promise<void> {
   }).eq("id", call.id);
 }
 
-// Structured post-call analysis → conversation summary (best effort; payload
-// shape not yet observed live — log keys on first events to refine).
+// Structured post-call analysis → conversation summary. Live payload shape
+// (verified 2026-09-14): { results: [{ result: "...", insight_id }],
+// conversation_id, call_control_id }.
 async function onInsightsGenerated(p: Payload): Promise<void> {
-  console.log("insights payload keys:", Object.keys(p || {}).join(","));
   const conversationId = (p.conversation_id ?? p.id) as string | undefined;
-  const summary = (p.insights?.summary ?? p.summary ?? null) as string | null;
+  const results = (p.results as Array<Record<string, unknown>> | undefined) ?? [];
+  const summary = (results.map((r) => r.result).filter(Boolean).join("\n\n")
+    || p.insights?.summary || p.summary || null) as string | null;
   if (!conversationId || !summary) return;
   const ccid = p.call_control_id as string | undefined;
   if (!ccid) return;

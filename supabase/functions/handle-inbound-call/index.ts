@@ -44,7 +44,12 @@ async function callAction(
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Telnyx ${action} ${res.status}: ${text.slice(0, 200)}`);
+    const msg = `Telnyx ${action} ${res.status}: ${text.slice(0, 400)}`;
+    // TEMP debug — action failures land here (console logs aren't shipped)
+    await supabase.schema("voice").from("webhook_debug")
+      .insert({ call_control_id: callControlId, event_type: `action:${action}`, error: msg })
+      .then(() => {}).catch(() => {});
+    throw new Error(msg);
   }
 }
 
@@ -240,7 +245,8 @@ async function onInitiated(p: Payload): Promise<void> {
 }
 
 async function onAnswered(p: Payload): Promise<void> {
-  if (p.direction !== "incoming") return;
+  // NOTE: call.answered payloads carry NO direction field (verified live
+  // 2026-09-14) — untracked outbound legs are filtered by the row lookup.
   const ccid = p.call_control_id as string;
 
   const { data: call } = await supabase
@@ -280,14 +286,13 @@ async function onAnswered(p: Payload): Promise<void> {
 }
 
 async function onSpeakEnded(p: Payload): Promise<void> {
-  if (p.direction !== "incoming") return;
   const ccid = p.call_control_id as string;
   const { data: call } = await supabase
     .schema("voice").from("calls")
     .select("id, outcome")
     .eq("telnyx_call_control_id", ccid).maybeSingle();
   if (call?.outcome === "voicemail") {
-    await callAction(ccid, "record_start", { format: "mp3", channels: "single" });
+    await callAction(ccid, "record_start", { format: "mp3", channels: "single", play_beep: true, max_length: 180 });
   }
 }
 
@@ -349,7 +354,6 @@ async function onHangup(p: Payload): Promise<void> {
 // inbox (messaging, channel 'voice'), link it on the call row, grab the
 // engine recording. Retry-safe: skips when the call row is already linked.
 async function onConversationEnded(p: Payload): Promise<void> {
-  console.log("conversation.ended payload keys:", Object.keys(p || {}).join(",")); // refine after first live event
   const conversationId = (p.conversation_id ?? p.id) as string | undefined;
   let ccid = p.call_control_id as string | undefined;
   if (!conversationId) return;
@@ -486,6 +490,14 @@ Deno.serve(async (req: Request) => {
   const type = event?.data?.event_type as string | undefined;
   const p = event?.data?.payload ?? {};
 
+  // TEMP debug — record every verified event
+  await supabase.schema("voice").from("webhook_debug").insert({
+    event_type: type ?? "unknown",
+    call_control_id: p?.call_control_id ?? null,
+    direction: p?.direction ?? null,
+    payload: p ?? null,
+  }).then(() => {}).catch(() => {});
+
   try {
     switch (type) {
       case "call.initiated": await onInitiated(p); break;
@@ -500,6 +512,10 @@ Deno.serve(async (req: Request) => {
   } catch (e) {
     // Still 200 — action failures must not trigger Telnyx retry storms
     console.error(`handle-inbound-call error [${type}]:`, e);
+    // TEMP debug
+    await supabase.schema("voice").from("webhook_debug")
+      .insert({ event_type: `error:${type}`, call_control_id: p?.call_control_id ?? null, error: String(e) })
+      .then(() => {}).catch(() => {});
   }
 
   return new Response(JSON.stringify({ received: true }), {

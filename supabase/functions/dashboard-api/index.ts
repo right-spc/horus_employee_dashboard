@@ -2660,6 +2660,15 @@ Your tone should be ${aiTone}, warm, and concise.
             .single();
           if (error) throw error;
 
+          // Point the number's voice connection at the shared Call Control app —
+          // from now on inbound calls hit handle-inbound-call, which routes by
+          // dialed number (checks → answer → per-org assistant / fallback).
+          const routing = await ensureVoiceRouting(adminClient);
+          await telnyx(`/phone_numbers/${ordered.id}`, {
+            method: "PATCH",
+            body: JSON.stringify({ connection_id: routing.appId }),
+          });
+
           // Voice burn rate tracks the number type: local 10 cr/min, toll-free 12
           const numberType = numberTypeFor(phone_number);
           await adminClient
@@ -2805,6 +2814,51 @@ Your tone should be ${aiTone}, warm, and concise.
             instructions_chars: instructions.length,
             kb_version: kbVersion,
           });
+        }
+
+        case "setup_voice_routing": {
+          // Owner-only infra action: idempotently creates the shared Call Control
+          // app + outbound profile (stored in system.settings.voice_routing).
+          // Optionally attaches an EXISTING account number to an org — used once
+          // to migrate the Phase 0 test line into Call Control routing.
+          if (dashUser.role !== "owner") return err("Owner only", 403);
+          const routing = await ensureVoiceRouting(adminClient);
+
+          const { attach_org_id, attach_telnyx_number_id, attach_phone_number } = body as Record<string, string | undefined>;
+          if (attach_org_id || attach_telnyx_number_id || attach_phone_number) {
+            if (!attach_org_id || !attach_telnyx_number_id || !attach_phone_number) {
+              return err("attach needs attach_org_id + attach_telnyx_number_id + attach_phone_number", 400);
+            }
+            if (!/^\+1\d{10}$/.test(attach_phone_number)) return err("attach_phone_number must be E.164 US (+1XXXXXXXXXX)", 400);
+            await assertOrgAccess(adminClient, dashUser, attach_org_id);
+            await assertVoiceAllowed(adminClient, attach_org_id);
+
+            const { data: existingNum } = await adminClient
+              .schema("core").from("phone_numbers").select("id")
+              .eq("organization_id", attach_org_id).neq("status", "released").maybeSingle();
+            if (existingNum) return err("That org already has a number — release it first", 400);
+
+            await telnyx(`/phone_numbers/${attach_telnyx_number_id}`, {
+              method: "PATCH",
+              body: JSON.stringify({ connection_id: routing.appId }),
+            });
+            const { error: nErr } = await adminClient.schema("core").from("phone_numbers").insert({
+              organization_id: attach_org_id,
+              telnyx_number_id: attach_telnyx_number_id,
+              phone_number: attach_phone_number,
+              capabilities: ["voice"],
+              status: "active",
+            });
+            if (nErr) throw nErr;
+
+            // Burn rate tracks number type (same rule as order_phone_number)
+            const numberType = numberTypeFor(attach_phone_number);
+            await adminClient.schema("core").from("org_services")
+              .update({ credit_cost: numberType === "local" ? 10 : 12, updated_at: new Date().toISOString() })
+              .eq("organization_id", attach_org_id).eq("service", "voice");
+          }
+
+          return ok({ success: true, app_id: routing.appId, outbound_profile_id: routing.outboundProfileId });
         }
 
         default:
@@ -2954,6 +3008,57 @@ Your tone should be ${aiTone}, warm, and concise.
     } catch {
       return false;
     }
+  }
+
+  // ── Voice routing: ONE shared Call Control app for all client calls ──────────
+  // Every client number points its voice connection at this app; its webhook
+  // (handle-inbound-call) routes by dialed number. Idempotent — creates the app
+  // + the shared outbound profile (transfer/forward legs) on first use and
+  // stores the ids in system.settings.voice_routing.
+  async function ensureVoiceRouting(
+    adminClient: ReturnType<typeof createClient>
+  ): Promise<{ appId: string; outboundProfileId: string | null }> {
+    const webhookUrl = `${SUPA_URL}/functions/v1/handle-inbound-call`;
+    const { data: row } = await adminClient.schema("system").from("settings")
+      .select("value").eq("key", "voice_routing").maybeSingle();
+    const saved = (row?.value ?? {}) as { app_id?: string; outbound_profile_id?: string };
+
+    if (saved.app_id) {
+      try {
+        await telnyx(`/call_control_applications/${saved.app_id}`);
+        return { appId: saved.app_id, outboundProfileId: saved.outbound_profile_id ?? null };
+      } catch { /* app deleted remotely — fall through and recreate */ }
+    }
+
+    let outboundProfileId = saved.outbound_profile_id ?? null;
+    if (!outboundProfileId) {
+      const pRaw = await telnyx(`/outbound_voice_profiles`, {
+        method: "POST",
+        body: JSON.stringify({ name: "horus-voice-outbound" }),
+      });
+      outboundProfileId = ((pRaw.data ?? pRaw) as Record<string, unknown>).id as string;
+      if (!outboundProfileId) throw new Error("Telnyx outbound profile create returned no id");
+    }
+
+    const appRaw = await telnyx(`/call_control_applications`, {
+      method: "POST",
+      body: JSON.stringify({
+        application_name: "horus-voice-inbound",
+        webhook_event_url: webhookUrl,
+        webhook_api_version: "2",
+        outbound: { outbound_voice_profile_id: outboundProfileId },
+      }),
+    });
+    const app = (appRaw.data ?? appRaw) as Record<string, unknown>;
+    const appId = app.id as string;
+    if (!appId) throw new Error("Telnyx call control app create returned no id");
+
+    await adminClient.schema("system").from("settings").upsert({
+      key: "voice_routing",
+      value: { app_id: appId, outbound_profile_id: outboundProfileId, webhook_url: webhookUrl },
+      updated_at: new Date().toISOString(),
+    });
+    return { appId, outboundProfileId };
   }
 
   // Demo orgs are fictional businesses — only owners may edit their business

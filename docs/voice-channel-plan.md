@@ -107,7 +107,8 @@ Proved on real PSTN calls to **+1 855 585 5518** (owner's number, assigned to th
 - Add `buildVoiceInstructions()`: same content + voice-style wrapper
 
 **1c. Edge functions** (all `verify_jwt=false`, deploy `--no-verify-jwt`, Ed25519 webhook signature verification):
-- `handle-inbound-call` — Call Control state machine (initiated → checks → answer → start assistant; hangup → finalize cost)
+- `handle-inbound-call` ✅ DEPLOYED (2026-09-14) — Call Control state machine live: initiated → route by dialed number (`voice.phone_numbers`) → checks (enabled / assistant synced / `is_pool_exceeded` / after-hours) → answer → `ai_assistant_start(org assistant)`; fallbacks: forward (blind transfer) / voicemail (speak greeting + `record_start`); `call.hangup` finalizes the row; signature-verified, retry-idempotent
+- **Shared Call Control app** ✅ — `horus-voice-inbound` (`3048561826393491427`) + shared outbound profile (`3048561820102035426`), ids in `system.settings.voice_routing`; `ensureVoiceRouting()` auto-creates on first order; `setup_voice_routing` owner action (+ attach-existing-number param, used to migrate the Phase 0 line +18555855518 → HD org); `order_phone_number` now assigns `connection_id` to the app
 - `voice-tools` — assistant webhook tools: check_availability, book_appointment, send_text, escalate. Auth via per-org integration-secret header. <2s response target
 - `handle-call-events` — conversation.ended / insights → transcript into conversations/messages (channel 'voice'), recording+cost into voice.calls, analytics events
 

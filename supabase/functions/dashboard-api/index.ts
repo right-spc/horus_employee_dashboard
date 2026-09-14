@@ -80,6 +80,95 @@
     return d;
   }
 
+  // ── Voice assistant prompt builder ───────────────────────────────────────────
+  // Mirrors widget-chat's buildSystemPrompt (same org data, same sections) but
+  // tuned for SPOKEN phone calls instead of a text chat widget. The whole KB is
+  // baked into the instructions: Telnyx caches the prompt prefix per assistant,
+  // so bigger instructions = faster + cheaper turns (Phase 0: ~88% of LLM tokens
+  // were cache hits on a 41K prompt).
+  const VOICE_KB_MAX_CHARS = 600_000;
+
+  function buildVoiceInstructions(params: {
+    org: Record<string, unknown>;
+    kbTexts: string[];
+    timezone?: string | null;
+  }): string {
+    const { org, kbTexts, timezone } = params;
+    const profile = (org.business_profiles as Record<string, unknown>[])?.[0];
+    const businessName = (profile?.business_name as string) || (org.name as string) || "the business";
+    const aiTone = (org.ai_tone as string) || "professional";
+
+    let prompt = `You are the AI phone receptionist for ${businessName}.
+Your tone should be ${aiTone}, warm, and concise.
+
+## How to Handle Calls
+- Answer questions about services, pricing, hours, and booking using the information below
+- Never make up information not provided in this prompt — if you don't know, say so honestly and offer to take a message
+- Keep answers short (1-3 sentences): the caller is listening, not reading
+- Speak naturally: no markdown, no bullet lists, no emojis, no special characters
+- Never use the word "live" — say "real person" or "our team" instead (the voice mispronounces it)
+- If the caller asks for a human or seems frustrated, apologize and offer to have someone from the team call them back
+- When the caller's request is fully handled or they say goodbye, thank them warmly and use the hangup tool to end the call`;
+
+    if (profile?.description) prompt += `\n\n## About the Business\n${profile.description}`;
+
+    if (profile?.booking_instructions || profile?.booking_url) {
+      prompt += `\n\n## Booking`;
+      if (profile.booking_instructions) prompt += `\n${profile.booking_instructions}`;
+      if (profile.booking_url) prompt += `\nBooking link: ${profile.booking_url} — if a caller wants it, offer to have the team text it over; never spell a URL out loud`;
+    }
+
+    if (profile?.cancellation_policy || profile?.deposit_policy) {
+      prompt += `\n\n## Policies`;
+      if (profile.cancellation_policy) prompt += `\nCancellation: ${profile.cancellation_policy}`;
+      if (profile.deposit_policy) prompt += `\nDeposit: ${profile.deposit_policy}`;
+    }
+
+    const hours = org.business_hours as Array<Record<string, unknown>>;
+    if (hours?.length) {
+      const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+      const hoursText = hours
+        .sort((a, b) => (a.day_of_week as number) - (b.day_of_week as number))
+        .map((h) =>
+          h.is_open
+            ? `${dayNames[h.day_of_week as number]}: ${h.open_time} - ${h.close_time}${h.note ? ` (${h.note})` : ""}`
+            : `${dayNames[h.day_of_week as number]}: Closed`
+        )
+        .join("\n");
+      prompt += `\n\n## Business Hours\n${hoursText}`;
+    }
+
+    const services = (org.business_services as Array<Record<string, unknown>>)?.filter((s) => s.is_active);
+    if (services?.length) {
+      const servicesText = services
+        .map((s) => {
+          let price = "";
+          if (s.price_type === "fixed") {
+            price = `$${((s.price_min_cents as number) / 100).toFixed(2)}`;
+          } else if (s.price_type === "range") {
+            price = `$${((s.price_min_cents as number) / 100).toFixed(2)} - $${((s.price_max_cents as number) / 100).toFixed(2)}`;
+          } else {
+            price = "Call for quote";
+          }
+          const duration = s.duration_minutes ? ` | ${s.duration_minutes} min` : "";
+          return `- ${s.name}: ${price}${duration}${s.description ? ` — ${s.description}` : ""}`;
+        })
+        .join("\n");
+      prompt += `\n\n## Services\n${servicesText}`;
+    }
+
+    if (kbTexts.length > 0) {
+      prompt += `\n\n## Knowledge Base\n${kbTexts.map((t, i) => `[${i + 1}] ${t}`).join("\n\n")}`;
+    }
+
+    // Current time — Telnyx dynamic variable resolved per call. Use the
+    // timezone-aware variant when the org has an IANA timezone configured.
+    const tz = timezone && /^[A-Za-z_]+\/[A-Za-z0-9_+\/-]+$/.test(timezone) ? timezone : null;
+    prompt += `\n\n## Current Time\nThe current date and time is {{telnyx_current_time${tz ? `_${tz}` : ""}}}. Use it when the caller says "today" or "tomorrow", or asks whether you're open.`;
+
+    return prompt;
+  }
+
   // ── Types ─────────────────────────────────────────────────────────────────────
 
   interface DashboardUser {
@@ -2607,6 +2696,117 @@
           return ok({ success: true });
         }
 
+        case "sync_voice_assistant": {
+          const { org_id } = body;
+          if (!org_id) return err("Missing org_id", 400);
+          await assertOrgAccess(adminClient, dashUser, org_id as string);
+          await assertVoiceAllowed(adminClient, org_id as string);
+
+          // Same org-data shape as widget-chat's buildSystemPrompt
+          const { data: org, error: orgErr } = await adminClient
+            .schema("core").from("organizations")
+            .select(`id, name, ai_tone, business_hours_timezone, active_kb_version_id,
+              business_profiles ( business_name, description, booking_url, booking_instructions, cancellation_policy, deposit_policy ),
+              business_hours ( day_of_week, is_open, open_time, close_time, note ),
+              business_services ( name, description, category, price_type, price_min_cents, price_max_cents, duration_minutes, is_active )`)
+            .eq("id", org_id).single();
+          if (orgErr || !org) return err("Organization not found", 404);
+
+          const { data: cfg } = await adminClient
+            .schema("core").from("voice_configs").select("*")
+            .eq("organization_id", org_id).maybeSingle();
+
+          // KB — whole active version baked in (mirrors widget-chat loadAllKbChunks)
+          const kbTexts: string[] = [];
+          let kbVersion: number | null = null;
+          if (org.active_kb_version_id) {
+            const { data: v } = await adminClient.schema("kb").from("kb_versions")
+              .select("version, sections").eq("id", org.active_kb_version_id as string).single();
+            kbVersion = (v?.version as number) ?? null;
+            const sections = (v?.sections as Array<{ title?: string; body?: string }>) || [];
+            let total = 0;
+            for (const s of sections) {
+              const text = s.title ? `## ${s.title}\n\n${s.body ?? ""}` : (s.body ?? "");
+              if (!text) continue;
+              total += text.length;
+              if (total > VOICE_KB_MAX_CHARS) {
+                kbTexts.push("[Note: knowledge base truncated due to size]");
+                break;
+              }
+              kbTexts.push(text);
+            }
+          }
+
+          const instructions = buildVoiceInstructions({
+            org,
+            kbTexts,
+            timezone: org.business_hours_timezone as string | null,
+          });
+          const profile = (org.business_profiles as Record<string, unknown>[])?.[0];
+          const businessName = (profile?.business_name as string) || (org.name as string) || "Business";
+
+          const payload = {
+            name: `${businessName} — AI Receptionist`.slice(0, 80),
+            model: "moonshotai/Kimi-K2.6",
+            instructions,
+            greeting: (cfg?.greeting_text as string) || "Thank you for calling! How can I help you today?",
+            voice_settings: { voice: (cfg?.tts_voice as string) || "Telnyx.Ultra.10bd4af4-825b-49b8-b8bd-0ca11865536e" },
+            transcription: { model: "deepgram/flux" },
+            telephony_settings: {
+              recording_settings: {
+                enabled: cfg?.recording_enabled ?? true,
+                channels: "dual",
+                format: "mp3",
+              },
+            },
+            privacy_settings: { data_retention: true },
+            // API-created assistants get NO default tools — hangup must be attached
+            // explicitly or the AI can never end the call.
+            tools: [{ type: "hangup", hangup: { description: "End the call when the caller's request is fully handled or they say goodbye." } }],
+          };
+
+          let assistantId = cfg?.telnyx_assistant_id as string | null;
+          if (assistantId) {
+            await telnyx(`/ai/assistants/${assistantId}`, { method: "PATCH", body: JSON.stringify(payload) });
+          } else {
+            const createdRaw = await telnyx(`/ai/assistants`, { method: "POST", body: JSON.stringify(payload) });
+            const created = (createdRaw.data ?? createdRaw) as Record<string, unknown>;
+            assistantId = created.id as string;
+            if (!assistantId) throw new Error("Telnyx create returned no assistant id");
+          }
+
+          // GET-verify — Telnyx PATCH has silently dropped fields before, never
+          // trust the write response. Retry the write once on mismatch.
+          const expectKb = kbTexts.length > 0;
+          const wantVoice = payload.voice_settings.voice;
+          let verified = await verifyAssistantSync(assistantId, businessName, wantVoice, expectKb);
+          if (!verified) {
+            await telnyx(`/ai/assistants/${assistantId}`, { method: "PATCH", body: JSON.stringify(payload) });
+            verified = await verifyAssistantSync(assistantId, businessName, wantVoice, expectKb);
+          }
+          if (!verified) throw new Error("Assistant sync failed verification — Telnyx did not store the pushed config");
+
+          const { data: saved, error: saveErr } = await adminClient
+            .schema("core").from("voice_configs")
+            .upsert({
+              organization_id: org_id,
+              telnyx_assistant_id: assistantId,
+              instructions_version: kbVersion,
+              synced_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            }, { onConflict: "organization_id" })
+            .select().single();
+          if (saveErr) throw saveErr;
+
+          return ok({
+            success: true,
+            config: saved,
+            assistant_id: assistantId,
+            instructions_chars: instructions.length,
+            kb_version: kbVersion,
+          });
+        }
+
         default:
           return err(`Unknown action: ${action}`, 400);
       }
@@ -2731,6 +2931,29 @@
       throw new Error(`Telnyx ${res.status}: ${text.slice(0, 300)}`);
     }
     return json;
+  }
+
+  // GET an assistant back and check the pushed state actually stuck — Telnyx
+  // PATCH has silently dropped fields before (wiping bug, hit twice in Phase 0).
+  async function verifyAssistantSync(
+    assistantId: string,
+    businessName: string,
+    wantVoice: string,
+    expectKb: boolean
+  ): Promise<boolean> {
+    try {
+      const raw = await telnyx(`/ai/assistants/${assistantId}`);
+      const a = (raw.data ?? raw) as Record<string, unknown>;
+      const instr = String(a.instructions || "");
+      const tools = (a.tools as Array<Record<string, unknown>>) || [];
+      const voice = (a.voice_settings as Record<string, unknown>)?.voice;
+      return instr.includes(businessName)
+        && (!expectKb || instr.includes("## Knowledge Base"))
+        && voice === wantVoice
+        && tools.some((t) => t.type === "hangup");
+    } catch {
+      return false;
+    }
   }
 
   // Demo orgs are fictional businesses — only owners may edit their business

@@ -1279,6 +1279,8 @@ function voiceCfg() {
     voicemail_greeting: VOICE_DEFAULT_VOICEMAIL,
     after_hours_mode: "fallback",
     telnyx_assistant_id: null,
+    synced_at: null,
+    updated_at: null,
   };
 }
 
@@ -1336,9 +1338,14 @@ function renderVoiceTab(el, org) {
     _voicePills = { orgId: org.id, fallbackMode: v.fallback_mode, afterHours: v.after_hours_mode };
   }
 
-  const assistantBadge = v.telnyx_assistant_id
-    ? `<span class="badge badge-green">Synced</span>`
-    : `<span class="badge badge-yellow">Not synced</span>`;
+  // Sync badge: no assistant yet → Not synced; config edited after last sync →
+  // Needs sync; otherwise Synced.
+  const stale = v.telnyx_assistant_id && v.synced_at && v.updated_at && new Date(v.updated_at) > new Date(v.synced_at);
+  const assistantBadge = !v.telnyx_assistant_id
+    ? `<span class="badge badge-yellow">Not synced</span>`
+    : stale
+      ? `<span class="badge badge-yellow">Needs sync</span>`
+      : `<span class="badge badge-green">Synced</span>`;
   const caps = (num?.capabilities || []).map(c => String(c)[0].toUpperCase() + String(c).slice(1));
 
   el.innerHTML = `
@@ -1352,6 +1359,7 @@ function renderVoiceTab(el, org) {
             · <strong>${usage.totalMinutes}</strong> min this cycle (<a href="#" onclick="event.preventDefault();switchTab('payments')" style="color:var(--primary)">Billing</a>)
           </div>
         </div>
+        <button class="btn btn-secondary btn-sm" id="v-sync-btn" style="margin-left:auto" onclick="voiceSyncAssistant()">Sync Assistant</button>
       </div>
     </div>
 
@@ -1493,6 +1501,22 @@ function voiceListHtml(selTelnyx) {
       </div>
       ${selTelnyx === o.telnyx ? `<span class="badge badge-blue">Selected</span>` : ""}
     </div>`).join("");
+}
+
+// Pushes the org's assistant config to Telnyx (create or PATCH + GET-verify
+// server-side), then refreshes the cached config from the returned row.
+async function voiceSyncAssistant() {
+  const btn = document.getElementById("v-sync-btn");
+  if (btn) { btn.disabled = true; btn.textContent = "Syncing…"; }
+  try {
+    const d = await api("sync_voice_assistant", { org_id: currentOrgId });
+    if (_voiceData?.orgId === currentOrgId) _voiceData.config = d.config;
+    toast(`Assistant synced — ${(d.instructions_chars / 1000).toFixed(1)}K chars${d.kb_version ? `, KB v${d.kb_version}` : ""}`, "success");
+    rerenderVoiceTab();
+  } catch (e) {
+    toast(e.message, "error");
+    if (btn) { btn.disabled = false; btn.textContent = "Sync Assistant"; }
+  }
 }
 
 async function voiceSetEnabled(checked) {

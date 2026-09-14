@@ -320,12 +320,14 @@ async function onHangup(p: Payload): Promise<void> {
   // AI calls: outcome refined later by conversation events (transcript/insights).
   const outcome = call.outcome ?? (call.answered_at ? "completed" : "abandoned");
 
-  // Cost + credits — only for answered calls. Credits burn in WHOLE minutes
-  // (carrier-style) at the org's voice rate; cost_usd uses exact duration.
+  // Cost + credits — credits burn ONLY when the AI engine engages (voicemail
+  // and forward fallbacks are free for the client; cost_usd still tracked
+  // internally). Credits burn in WHOLE minutes (carrier-style) at the org's
+  // voice rate; cost_usd uses exact duration.
   const aiEngaged = !!call.assistant_id;
   const recorded = aiEngaged || call.outcome === "voicemail";
   let credits = 0;
-  if (duration > 0) {
+  if (duration > 0 && aiEngaged) {
     const minutes = Math.ceil(duration / 60);
     const { data: svc } = await supabase
       .schema("core").from("org_services").select("credit_cost")

@@ -92,8 +92,9 @@
     org: Record<string, unknown>;
     kbTexts: string[];
     timezone?: string | null;
+    transferEnabled?: boolean;
   }): string {
-    const { org, kbTexts, timezone } = params;
+    const { org, kbTexts, timezone, transferEnabled } = params;
     const profile = (org.business_profiles as Record<string, unknown>[])?.[0];
     const businessName = (profile?.business_name as string) || (org.name as string) || "the business";
     const aiTone = (org.ai_tone as string) || "professional";
@@ -107,7 +108,9 @@ Your tone should be ${aiTone}, warm, and concise.
 - Keep answers short (1-3 sentences): the caller is listening, not reading
 - Speak naturally: no markdown, no bullet lists, no emojis, no special characters
 - Never use the word "live" — say "real person" or "our team" instead (the voice mispronounces it)
-- If the caller asks for a human or seems frustrated, apologize and offer to have someone from the team call them back
+${transferEnabled
+  ? "- If the caller asks for a human, seems frustrated, or has an urgent issue you cannot resolve, offer to connect them with the team right away. If they agree, use the transfer tool. If nobody picks up, apologize, take a message with their name and number, and assure them the team will call back"
+  : "- If the caller asks for a human or seems frustrated, apologize and offer to have someone from the team call them back"}
 - When the caller's request is fully handled or they say goodbye, thank them warmly and use the hangup tool to end the call`;
 
     if (profile?.description) prompt += `\n\n## About the Business\n${profile.description}`;
@@ -2750,9 +2753,39 @@ Your tone should be ${aiTone}, warm, and concise.
             org,
             kbTexts,
             timezone: org.business_hours_timezone as string | null,
+            transferEnabled: !!(cfg?.transfer_enabled && cfg?.transfer_number),
           });
           const profile = (org.business_profiles as Record<string, unknown>[])?.[0];
           const businessName = (profile?.business_name as string) || (org.name as string) || "Business";
+
+          // Org's own number — needed as the transfer `from` (must be account-
+          // owned on a connection with an outbound profile: the shared app).
+          const { data: orgNumber } = await adminClient
+            .schema("core").from("phone_numbers").select("phone_number")
+            .eq("organization_id", org_id).eq("status", "active").maybeSingle();
+
+          // API-created assistants get NO default tools — hangup must be attached
+          // explicitly or the AI can never end the call. Transfer is attached only
+          // when the org enabled it AND has a number to transfer from.
+          const tools: Array<Record<string, unknown>> = [
+            { type: "hangup", hangup: { description: "End the call when the caller's request is fully handled or they say goodbye." } },
+          ];
+          const transferOn = !!(cfg?.transfer_enabled && cfg?.transfer_number && orgNumber?.phone_number);
+          if (transferOn) {
+            tools.push({
+              type: "transfer",
+              transfer: {
+                targets: [{ name: "The team", to: cfg!.transfer_number }],
+                from: orgNumber!.phone_number,
+                // Human answers → bridged. Voicemail → transfer cancelled, the AI
+                // takes the call back and takes a message (announced-transfer L1).
+                voicemail_detection: {
+                  detection_mode: "premium",
+                  on_voicemail_detected: { action: "stop_transfer" },
+                },
+              },
+            });
+          }
 
           const payload = {
             name: `${businessName} — AI Receptionist`.slice(0, 80),
@@ -2769,9 +2802,7 @@ Your tone should be ${aiTone}, warm, and concise.
               },
             },
             privacy_settings: { data_retention: true },
-            // API-created assistants get NO default tools — hangup must be attached
-            // explicitly or the AI can never end the call.
-            tools: [{ type: "hangup", hangup: { description: "End the call when the caller's request is fully handled or they say goodbye." } }],
+            tools,
           };
 
           let assistantId = cfg?.telnyx_assistant_id as string | null;
@@ -2788,12 +2819,12 @@ Your tone should be ${aiTone}, warm, and concise.
           // trust the write response. Retry the write once on mismatch.
           const expectKb = kbTexts.length > 0;
           const wantVoice = payload.voice_settings.voice;
-          let verified = await verifyAssistantSync(assistantId, businessName, wantVoice, expectKb);
-          if (!verified) {
+          let verified = await verifyAssistantSync(assistantId, businessName, wantVoice, expectKb, transferOn);
+          if (!verified.ok) {
             await telnyx(`/ai/assistants/${assistantId}`, { method: "PATCH", body: JSON.stringify(payload) });
-            verified = await verifyAssistantSync(assistantId, businessName, wantVoice, expectKb);
+            verified = await verifyAssistantSync(assistantId, businessName, wantVoice, expectKb, transferOn);
           }
-          if (!verified) throw new Error("Assistant sync failed verification — Telnyx did not store the pushed config");
+          if (!verified.ok) throw new Error("Assistant sync failed verification — Telnyx did not store the pushed config");
 
           const { data: saved, error: saveErr } = await adminClient
             .schema("core").from("voice_configs")
@@ -2813,6 +2844,7 @@ Your tone should be ${aiTone}, warm, and concise.
             assistant_id: assistantId,
             instructions_chars: instructions.length,
             kb_version: kbVersion,
+            attached_tools: verified.tools,
           });
         }
 
@@ -2989,24 +3021,28 @@ Your tone should be ${aiTone}, warm, and concise.
 
   // GET an assistant back and check the pushed state actually stuck — Telnyx
   // PATCH has silently dropped fields before (wiping bug, hit twice in Phase 0).
+  // Returns the attached tool types too, so the sync response can show them.
   async function verifyAssistantSync(
     assistantId: string,
     businessName: string,
     wantVoice: string,
-    expectKb: boolean
-  ): Promise<boolean> {
+    expectKb: boolean,
+    expectTransfer: boolean
+  ): Promise<{ ok: boolean; tools: string[] }> {
     try {
       const raw = await telnyx(`/ai/assistants/${assistantId}`);
       const a = (raw.data ?? raw) as Record<string, unknown>;
       const instr = String(a.instructions || "");
-      const tools = (a.tools as Array<Record<string, unknown>>) || [];
+      const tools = ((a.tools as Array<Record<string, unknown>>) || []).map((t) => String(t.type));
       const voice = (a.voice_settings as Record<string, unknown>)?.voice;
-      return instr.includes(businessName)
+      const ok = instr.includes(businessName)
         && (!expectKb || instr.includes("## Knowledge Base"))
         && voice === wantVoice
-        && tools.some((t) => t.type === "hangup");
+        && tools.includes("hangup")
+        && (!expectTransfer || tools.includes("transfer"));
+      return { ok, tools };
     } catch {
-      return false;
+      return { ok: false, tools: [] };
     }
   }
 
